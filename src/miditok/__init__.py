@@ -18,6 +18,7 @@ from .tokenizations import (
     Octuple,
     PerTok,
     Structured,
+    StructuredREMI,
 )
 from .tokenizer_training_iterator import TokTrainingIterator
 
@@ -31,13 +32,14 @@ __all__ = [
     "REMI",
     "TSD",
     "Structured",
+    "StructuredREMI",
     "Octuple",
     "CPWord",
     "MuMIDI",
     "MMM",
     "PerTok",
     "utils",
-    "data_augmentation",
+    "data_augmentat ion",
 ]
 
 try:

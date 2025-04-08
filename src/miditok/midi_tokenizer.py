@@ -1117,28 +1117,11 @@ class MusicTokenizer(ABC, HFHubMixin):
         attribute_controls_indexes: Mapping[int, Mapping[int, Sequence[int] | bool]]
         | None = None,
     ) -> TokSequence | list[TokSequence]:
-        r"""
-        Convert a **preprocessed** ``symusic.Score`` object to a sequence of tokens.
+        print("\n=== Starting _score_to_tokens in MusicTokenizer ===")
+        print(f"Score tracks: {len(score.tracks)}")
+        print(f"Using one token stream: {self.config.one_token_stream_for_programs}")
+        print(f"Has attribute controls: {len(self.attribute_controls) > 0}")
 
-        The workflow of this method is as follows: the global events (*Tempo*,
-        *TimeSignature*...) and track events (*Pitch*, *Velocity*, *Pedal*...) are
-        gathered into a list, then the time events are added. If ``one_token_stream`` is
-        ``True``, all events of all tracks are treated all at once, otherwise the
-        events of each track are treated independently.
-
-        :param score: the :class:`symusic.Score` object to convert.
-        :param attribute_controls_indexes: indices of the attribute controls to compute
-            and associated tracks and bars. This argument has to be provided as a
-            dictionary mapping track indices to dictionaries mapping attribute control
-            indices (indexing ``tokenizer.attribute_controls``) to a sequence of bar
-            indexes if the AC is "bar-level" or anything if it is "track-level".
-            Its structure is as:
-            ``{track_idx: {ac_idx: Any (track ac) | [bar_idx, ...] (bar ac)}}``
-            This argument is meant to be used when training a model in order to make it
-            learn to generate tokens accordingly to the attribute controls.
-        :return: a :class:`miditok.TokSequence` if ``tokenizer.one_token_stream`` is
-            ``True``, else a list of :class:`miditok.TokSequence` objects.
-        """
         # Create events list
         all_events = []
         if not self.config.one_token_stream_for_programs:
@@ -1150,7 +1133,10 @@ class MusicTokenizer(ABC, HFHubMixin):
             attribute_controls_indexes = {}
 
         # Global events (Tempo, TimeSignature)
+        print("\nCreating global events...")
         global_events = self._create_global_events(score)
+        print(f"Created {len(global_events)} global events")
+        
         if self.config.one_token_stream_for_programs:
             all_events += global_events
         else:
@@ -1158,7 +1144,7 @@ class MusicTokenizer(ABC, HFHubMixin):
                 all_events[i] += global_events
 
         # Compute ticks_per_beat sections depending on the time signatures
-        # This has to be computed several times, in preprocess after resampling & here.
+        print("\nComputing ticks per beat...")
         if (
             not self._note_on_off
             or (self.config.use_sustain_pedals and self.config.sustain_pedal_duration)
@@ -1169,13 +1155,17 @@ class MusicTokenizer(ABC, HFHubMixin):
                 ticks_per_beat = get_score_ticks_per_beat(score)
             else:
                 ticks_per_beat = np.array([[score.end(), self.time_division]])
+            print(f"Ticks per beat array shape: {ticks_per_beat.shape}")
         else:
             ticks_per_beat = None
+            print("Not using ticks per beat")
 
         # Adds track tokens
+        print("\nProcessing tracks...")
         ticks_bars = get_bars_ticks(score, only_notes_onsets=True)
         ticks_beats = get_beats_ticks(score, only_notes_onsets=True)
         for ti, track in enumerate(score.tracks):
+            print(f"\nProcessing track {ti}...")
             track_events = self._create_track_events(
                 track,
                 ticks_per_beat,
@@ -1184,21 +1174,28 @@ class MusicTokenizer(ABC, HFHubMixin):
                 ticks_beats,
                 attribute_controls_indexes.get(ti, None),
             )
+            print(f"Created {len(track_events)} track events")
+            
             if self.config.one_token_stream_for_programs:
                 all_events += track_events
             else:
                 all_events[ti] += track_events
                 self._sort_events(all_events[ti])
+                
         if self.config.one_token_stream_for_programs:
+            print("\nSorting all events...")
             self._sort_events(all_events)
             # Add ProgramChange (named Program) tokens if requested.
             if self.config.program_changes:
+                print("Adding program change events...")
                 self._insert_program_change_events(all_events)
         # Special case where there are only tempos/time sigs, we still need to sort them
         elif len(score.tracks) == 0 and len(all_events[0]) > 2:
+            print("\nSorting tempo/time signature events...")
             self._sort_events(all_events[0])
 
         # Add time events
+        print("\nAdding time events...")
         if self.config.one_token_stream_for_programs:
             all_events = self._add_time_events(all_events, score.ticks_per_quarter)
             tok_sequence = TokSequence(events=all_events)
@@ -1206,6 +1203,7 @@ class MusicTokenizer(ABC, HFHubMixin):
         else:
             tok_sequence = []
             for i in range(len(all_events)):
+                print(f"Adding time events for track {i}...")
                 all_events[i] = self._add_time_events(
                     all_events[i], score.ticks_per_quarter
                 )
@@ -1224,335 +1222,17 @@ class MusicTokenizer(ABC, HFHubMixin):
                 tok_sequence.append(TokSequence(events=all_events[i]))
                 self.complete_sequence(tok_sequence[-1])
 
+        print("\n=== _score_to_tokens complete ===")
         return tok_sequence
 
-    def _sort_events(self, events: list[Event]) -> None:
-        # Can be overridden by subclasses if required (MIDILike)
-        events.sort(key=lambda e: e.time)
-        # Set Events of track-level attribute controls from -1 to 0 after sorting
-        if len(self.attribute_controls) > 0:
-            for event in events:
-                if not event.type_.startswith("ACTrack"):
-                    break
-                event.time = 0
-
-    def _create_track_events(
-        self,
-        track: Track,
-        ticks_per_beat: np.ndarray,
-        time_division: int,
-        ticks_bars: Sequence[int],
-        ticks_beats: Sequence[int],
-        attribute_controls_indexes: Mapping[int, Sequence[int] | bool] | None = None,
-    ) -> list[Event]:
-        r"""
-        Extract the tokens/events from a track (``symusic.Track``).
-
-        Concerned events are: *Pitch*, *Velocity*, *Duration*, *NoteOn*, *NoteOff* and
-        optionally *Chord*, *Pedal* and *PitchBend*.
-        **If the tokenizer is using pitch intervals, the notes must be sorted by time
-        then pitch values. This is done in**
-        :py:func:`miditok.MusicTokenizer.preprocess_score`.
-
-        :param track: ``symusic.Track`` to extract events from.
-        :param ticks_per_beat: array indicating the number of ticks per beat per
-            section. The numbers of ticks per beat depend on the time signatures of
-            the Score being parsed. The array has a shape ``(N,2)``, for ``N`` changes
-            of ticks per beat, and the second dimension representing the end tick of
-            each portion and the number of ticks per beat respectively.
-            This argument is not required if the tokenizer is not using *Duration*,
-            *PitchInterval* or *Chord* tokens. (default: ``None``)
-        :param time_division: time division in ticks per quarter note of the file.
-        :param ticks_bars: ticks indicating the beginning of each bar.
-        :param ticks_beats: ticks indicating the beginning of each beat.
-        :param attribute_controls_indexes: indices of the attribute controls to compute
-            This argument has to be provided as a dictionary mapping attribute control
-            indices (indexing ``tokenizer.attribute_controls``) to a sequence of
-            bar indexes if the AC is "bar-level" or anything if it is "track-level".
-            Its structure is as: ``{ac_idx: Any (track ac) | [bar_idx, ...] (bar ac)}``
-            This argument is meant to be used when training a model in order to make it
-            learn to generate tokens accordingly to the attribute controls.
-        :return: sequence of corresponding ``Event``s.
-        """
-        program = track.program if not track.is_drum else -1
-        use_durations = program in self.config.use_note_duration_programs
-        events = []
-        # max_time_interval is adjusted depending on the time signature denom / tpb
-        max_time_interval = 0
-        if self.config.use_pitch_intervals:
-            max_time_interval = (
-                ticks_per_beat[0, 1] * self.config.pitch_intervals_max_time_dist
-            )
-        previous_note_onset = -max_time_interval - 1
-        previous_pitch_onset = -128  # lowest at a given time
-        previous_pitch_chord = -128  # for chord intervals
-
-        # Attribute controls
-        if attribute_controls_indexes:
-            for ac_idx, tracks_bars_idx in attribute_controls_indexes.items():
-                if (
-                    isinstance(self.attribute_controls[ac_idx], BarAttributeControl)
-                    and len(tracks_bars_idx) == 0
-                ):
-                    continue
-                events += self.attribute_controls[ac_idx].compute(
-                    track,
-                    time_division,
-                    ticks_bars,
-                    ticks_beats,
-                    tracks_bars_idx,
-                )
-
-        # Add sustain pedal
-        if self.config.use_sustain_pedals:
-            tpb_idx = 0
-            for pedal in track.pedals:
-                # If not using programs, the default value is 0
-                events.append(
-                    Event(
-                        "Pedal",
-                        program,
-                        pedal.time,
-                        program,
-                    )
-                )
-                # PedalOff or Duration
-                if self.config.sustain_pedal_duration:
-                    # `while` here as there might not be any note in the next section
-                    while pedal.time >= ticks_per_beat[tpb_idx, 0]:
-                        tpb_idx += 1
-                    dur = self._tpb_ticks_to_tokens[ticks_per_beat[tpb_idx, 1]][
-                        pedal.duration
-                    ]
-                    events.append(
-                        Event(
-                            "Duration",
-                            dur,
-                            pedal.time,
-                            program,
-                            "PedalDuration",
-                        )
-                    )
-                else:
-                    events.append(Event("PedalOff", program, pedal.end, program))
-
-        # Add pitch bend
-        if self.config.use_pitch_bends:
-            for pitch_bend in track.pitch_bends:
-                if self.config.use_programs and not self.config.program_changes:
-                    events.append(
-                        Event(
-                            "Program",
-                            program,
-                            pitch_bend.time,
-                            program,
-                            "ProgramPitchBend",
-                        )
-                    )
-                events.append(
-                    Event("PitchBend", pitch_bend.value, pitch_bend.time, program)
-                )
-
-        # Control changes (in the future, and handle pedals redundancy)
-
-        # Add chords
-        if self.config.use_chords and not track.is_drum:
-            chords = detect_chords(
-                track.notes,
-                ticks_per_beat,
-                chord_maps=self.config.chord_maps,
-                program=program,
-                specify_root_note=self.config.chord_tokens_with_root_note,
-                beat_res=self._first_beat_res,
-                unknown_chords_num_notes_range=self.config.chord_unknown,
-            )
-            for chord in chords:
-                if self.config.use_programs and not self.config.program_changes:
-                    events.append(
-                        Event("Program", program, chord.time, program, "ProgramChord")
-                    )
-                events.append(chord)
-
-        # Creates the Note On, Note Off and Velocity events
-        tpb_idx = 0
-        for note in track.notes:
-            # Program
-            if self.config.use_programs and not self.config.program_changes:
-                events.append(
-                    Event(
-                        type_="Program",
-                        value=program,
-                        time=note.start,
-                        program=program,
-                        desc=note.end,
-                    )
-                )
-
-            # Pitch interval
-            add_absolute_pitch_token = True
-            if self.config.use_pitch_intervals and not track.is_drum:
-                # Adjust max_time_interval if needed
-                if note.time >= ticks_per_beat[tpb_idx, 0]:
-                    tpb_idx += 1
-                    max_time_interval = (
-                        ticks_per_beat[tpb_idx, 1]
-                        * self.config.pitch_intervals_max_time_dist
-                    )
-                if note.start != previous_note_onset:
-                    if (
-                        note.start - previous_note_onset <= max_time_interval
-                        and abs(note.pitch - previous_pitch_onset)
-                        <= self.config.max_pitch_interval
-                    ):
-                        events.append(
-                            Event(
-                                type_="PitchIntervalTime",
-                                value=note.pitch - previous_pitch_onset,
-                                time=note.start,
-                                program=program,
-                                desc=note.end,
-                            )
-                        )
-                        add_absolute_pitch_token = False
-                    previous_pitch_onset = previous_pitch_chord = note.pitch
-                else:  # same onset time
-                    if (
-                        abs(note.pitch - previous_pitch_chord)
-                        <= self.config.max_pitch_interval
-                    ):
-                        events.append(
-                            Event(
-                                type_="PitchIntervalChord",
-                                value=note.pitch - previous_pitch_chord,
-                                time=note.start,
-                                program=program,
-                                desc=note.end,
-                            )
-                        )
-                        add_absolute_pitch_token = False
-                    else:
-                        # We update previous_pitch_onset as there might be a chord
-                        # interval starting from the current note to the next one.
-                        previous_pitch_onset = note.pitch
-                    previous_pitch_chord = note.pitch
-                previous_note_onset = note.start
-
-            # Pitch / NoteOn
-            if add_absolute_pitch_token:
-                if self.config.use_pitchdrum_tokens and track.is_drum:
-                    note_token_name = "DrumOn" if self._note_on_off else "PitchDrum"
-                else:
-                    note_token_name = "NoteOn" if self._note_on_off else "Pitch"
-                events.append(
-                    Event(
-                        type_=note_token_name,
-                        value=note.pitch,
-                        time=note.start,
-                        program=program,
-                        desc=note.end,
-                    )
-                )
-
-            # Velocity
-            if self.config.use_velocities:
-                events.append(
-                    Event(
-                        type_="Velocity",
-                        value=note.velocity,
-                        time=note.start,
-                        program=program,
-                        desc=f"{note.velocity}",
-                    )
-                )
-
-            # Duration / NoteOff
-            if use_durations:
-                if self._note_on_off:
-                    if self.config.use_programs and not self.config.program_changes:
-                        events.append(
-                            Event(
-                                type_="Program",
-                                value=program,
-                                time=note.end,
-                                program=program,
-                                desc="ProgramNoteOff",
-                            )
-                        )
-                    events.append(
-                        Event(
-                            type_="DrumOff"
-                            if self.config.use_pitchdrum_tokens and track.is_drum
-                            else "NoteOff",
-                            value=note.pitch,
-                            time=note.end,
-                            program=program,
-                            desc=note.end,
-                        )
-                    )
-                else:
-                    events.append(
-                        self._create_duration_event(
-                            note=note,
-                            _program=program,
-                            _ticks_per_beat=ticks_per_beat,
-                            _tpb_idx=tpb_idx,
-                        )
-                    )
-
-        return events
-
-    def _create_duration_event(
-        self, note: Note, _program: int, _ticks_per_beat: np.ndarray, _tpb_idx: int
-    ) -> Event:
-        while note.time >= _ticks_per_beat[_tpb_idx, 0]:
-            _tpb_idx += 1
-        dur = self._tpb_ticks_to_tokens[_ticks_per_beat[_tpb_idx, 1]][note.duration]
-        return Event(
-            type_="Duration",
-            value=dur,
-            time=note.start,
-            program=_program,
-            desc=f"{note.duration} ticks",
-        )
-
-    @staticmethod
-    def _insert_program_change_events(events: list[Event]) -> None:
-        """
-        Add inplace *Program* tokens acting as Program Changes to a list of ``Event``s.
-
-        :param events: Events to add Programs
-        """
-        previous_program = None
-        previous_type = None
-        program_change_events = []
-        for ei, event in enumerate(events):
-            if (
-                event.program is not None
-                and event.program != previous_program
-                and event.type_ not in ["Pedal", "PedalOff", *TOKEN_TYPE_BEFORE_PC]
-                and not (event.type_ == "Duration" and previous_type == "Pedal")
-            ):
-                previous_program = event.program
-                program_change_events.append(
-                    (ei, Event("Program", event.program, event.time))
-                )
-            previous_type = event.type_
-
-        for idx, event in reversed(program_change_events):
-            events.insert(idx, event)
-
     def _create_global_events(self, score: Score) -> list[Event]:
-        r"""
-        Create the *global* music tokens: ``Tempo`` and ``TimeSignature``.
-
-        :param score: ``symusic.Score`` to extract the events from.
-        :return: list of ``miditok.classes.Event``.
-        """
+        print("\n=== Starting _create_global_events in MusicTokenizer ===")
         events = []
 
         # First adds time signature tokens if specified
         if self.config.use_time_signatures:
-            events += [
+            print("\nProcessing time signatures...")
+            ts_events = [
                 Event(
                     type_="TimeSig",
                     value=f"{time_sig.numerator}/{time_sig.denominator}",
@@ -1560,10 +1240,13 @@ class MusicTokenizer(ABC, HFHubMixin):
                 )
                 for time_sig in score.time_signatures
             ]
+            print(f"Created {len(ts_events)} time signature events")
+            events += ts_events
 
         # Adds tempo events if specified
         if self.config.use_tempos:
-            events += [
+            print("\nProcessing tempos...")
+            tempo_events = [
                 Event(
                     type_="Tempo",
                     value=round(tempo.tempo, 2),  # req to handle c++ values
@@ -1572,7 +1255,10 @@ class MusicTokenizer(ABC, HFHubMixin):
                 )
                 for tempo in score.tempos
             ]
+            print(f"Created {len(tempo_events)} tempo events")
+            events += tempo_events
 
+        print(f"\nTotal global events: {len(events)}")
         return events
 
     @abstractmethod
@@ -1607,62 +1293,38 @@ class MusicTokenizer(ABC, HFHubMixin):
         attribute_controls_indexes: Mapping[int, Mapping[int, Sequence[int] | bool]]
         | None = None,
     ) -> TokSequence | list[TokSequence]:
-        r"""
-        Tokenize a music file (MIDI/abc), given as a ``symusic.Score`` or a file path.
+        print("\n=== Starting encode() in MusicTokenizer ===")
+        print(f"Input type: {type(score)}")
+        print(f"encode_ids: {encode_ids}")
+        print(f"no_preprocess_score: {no_preprocess_score}")
 
-        You can provide a ``Path`` to the file to tokenize, or a ``symusic.Score``
-        object.
-        This method returns a (list of) :class:`miditok.TokSequence`.
-
-        If you are implementing your own tokenization by subclassing this class,
-        **override the protected** ``_score_to_tokens`` **method**.
-
-        :param score: the ``symusic.Score`` object to convert.
-        :param encode_ids: the backbone model (BPE, Unigram, WordPiece) will encode the
-            tokens and compress the sequence. Can only be used if the tokenizer has been
-            trained. (default: ``True``)
-        :param no_preprocess_score: whether to preprocess the ``symusic.Score``. If this
-            argument is provided as ``True``, make sure that the corresponding music
-            file / ``symusic.Score`` has already been preprocessed by the tokenizer
-            (:py:func:`miditok.MusicTokenizer.preprocess_score`) or that its content is
-            aligned with the tokenizer's vocabulary, otherwise the tokenization is
-            likely to crash. This argument is useful in cases where you need to use the
-            preprocessed ``symusic.Score`` along with the tokens to not have to
-            preprocess it twice as this method preprocesses it inplace.
-            (default: ``False``)
-        :param attribute_controls_indexes: indices of the attribute controls to compute
-            and associated tracks and bars. This argument has to be provided as a
-            dictionary mapping track indices to dictionaries mapping attribute control
-            indices (indexing ``tokenizer.attribute_controls``) to a sequence of bar
-            indexes if the AC is "bar-level" or anything if it is "track-level".
-            Its structure is as:
-            ``{track_idx: {ac_idx: Any (track ac) | [bar_idx, ...] (bar ac)}}``
-            This argument is meant to be used when training a model in order to make it
-            learn to generate tokens accordingly to the attribute controls. For maximum
-            safety, it should be used with ``no_preprocess_score`` with an already
-            preprocessed ``symusic.Score`` in order to make sure that the provided
-            tracks indexes will remain correct as the preprocessing might delete or
-            merge tracks depending on the tokenizer's configuration.
-        :return: a :class:`miditok.TokSequence` if ``tokenizer.one_token_stream`` is
-            ``True``, else a list of :class:`miditok.TokSequence` objects.
-        """
         # Load the file if a path was given
         if not isinstance(score, ScoreTick):
+            print("Loading score from path...")
             score = Score(score)
 
         # Preprocess the music file
         if not no_preprocess_score:
+            print("\nPreprocessing score...")
             score = self.preprocess_score(score)
+            print("Score preprocessing complete")
 
         # Tokenize it
+        print("\nTokenizing score...")
         tokens = self._score_to_tokens(score, attribute_controls_indexes)
+        print("Score tokenization complete")
+        
         # Add bar/beat ticks here to TokSeq as they need to be from preprocessed Score
+        print("\nAdding bar/beat ticks...")
         add_bar_beats_ticks_to_tokseq(tokens, score)
 
         # Encode the ids if the tokenizer is trained
         if encode_ids and self.is_trained:
+            print("\nEncoding token ids...")
             self.encode_token_ids(tokens)
+            print("Token id encoding complete")
 
+        print("\n=== encode() complete ===")
         return tokens
 
     def complete_sequence(self, seq: TokSequence, complete_bytes: bool = False) -> None:

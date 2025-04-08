@@ -14,6 +14,7 @@ from .octuple import Octuple
 from .pertok import PerTok
 from .remi import REMI
 from .structured import Structured
+from .structured_remi import StructuredREMI
 from .tsd import TSD
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "MuMIDI",
     "MMM",
     "PerTok",
+    "StructuredREMI",
 ]

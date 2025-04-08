@@ -365,14 +365,28 @@ class DatasetJSON(_DatasetABC):
         """
         with self.files_paths[idx].open() as json_file:
             token_ids = json.load(json_file)["ids"]
-        token_ids = self._preprocess_token_ids(
+
+        # --- ADDED Check for nested lists ---
+        if token_ids and isinstance(token_ids[0], list):
+            print(f"WARNING [DatasetJSON {idx}]: Loaded token_ids is a list of lists, but DatasetJSON expects a single stream. Using only the first stream.")
+            token_ids = token_ids[0] # Use only the first stream
+        # --- END Check ---
+
+        print(f"DEBUG [DatasetJSON {idx}]: Loaded {len(token_ids)} tokens. Effective max len: {self._effective_max_seq_len}")
+        token_ids_processed = self._preprocess_token_ids(
             token_ids,
             self._effective_max_seq_len,
             self.bos_token_id,
             self.eos_token_id,
         )
+        print(f"DEBUG [DatasetJSON {idx}]: Processed to {len(token_ids_processed)} tokens.")
 
-        return {"input_ids": LongTensor(token_ids)}
+        # --- DEBUGGING ADDED ---
+        print(f"DEBUG [DatasetJSON {idx}]: Type of token_ids_processed: {type(token_ids_processed)}")
+        print(f"DEBUG [DatasetJSON {idx}]: Content of token_ids_processed (first 10): {token_ids_processed[:10]}")
+        # --- END DEBUGGING ---
+
+        return {"input_ids": LongTensor(token_ids_processed)}
 
     def __len__(self) -> int:
         """

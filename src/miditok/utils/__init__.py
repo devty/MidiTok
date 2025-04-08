@@ -61,3 +61,5 @@ __all__ = [
     "split_tokens_files_to_subsequences",
     "split_seq_in_subsequences",
 ]
+
+# This file makes the 'utils' directory a Python package
