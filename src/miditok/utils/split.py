@@ -367,19 +367,31 @@ def split_tokens_files_to_subsequences(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for file_path in files_paths:
-        with Path(file_path).open() as json_file:
-            tokens = json.load(json_file)
+    # Wrap the loop with tqdm for progress visualization
+    for file_path in tqdm(files_paths, desc=f"Splitting token files in {out_dir.name}"):
+        try: # Added try-except block for robustness
+            with Path(file_path).open() as json_file:
+                tokens = json.load(json_file)
+        except json.JSONDecodeError:
+            warn(f"Error decoding JSON file: {file_path}. Skipping.", stacklevel=2)
+            continue
+        except Exception as e:
+            warn(f"Error reading file {file_path}: {e}. Skipping.", stacklevel=2)
+            continue
 
         # Split sequence(s)
         if one_token_stream:
+            if "ids" not in tokens:
+                warn(f"'ids' key not found in {file_path}. Skipping.", stacklevel=2)
+                continue
+            if not isinstance(tokens["ids"], list):
+                warn(f"'ids' in {file_path} is not a list. Skipping.", stacklevel=2)
+                continue
+            # Optional: Log sequence length before splitting
+            # print(f"  Processing {file_path.name}, sequence length: {len(tokens['ids'])}")
             subseqs = split_seq_in_subsequences(tokens["ids"], min_seq_len, max_seq_len)
         else:
             subseqs = []
-            for track_seq in tokens["ids"]:
-                subseqs += split_seq_in_subsequences(
-                    track_seq, min_seq_len, max_seq_len
-                )
 
         # Save subsequences
         for i, subseq in enumerate(subseqs):
@@ -387,7 +399,7 @@ def split_tokens_files_to_subsequences(
             with path.open("w") as outfile:
                 new_tok = deepcopy(tokens)
                 new_tok["ids"] = subseq
-                json.dump(tokens, outfile)
+                json.dump(new_tok, outfile)
 
 
 def _preprocess_time_signatures(score: Score, tokenizer: MusicTokenizer) -> None:
