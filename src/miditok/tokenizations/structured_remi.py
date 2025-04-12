@@ -131,6 +131,13 @@ class StructuredREMI(REMI):
         params: str | Path | None = None,
     ) -> None:
         print("\n=== Initializing StructuredREMI instance ===")
+        
+        # --- Initialize logger FIRST --- 
+        self.logger = logging.getLogger(__name__)
+        # print(f"DEBUG: Logger name is {__name__}") # Optional print
+        self.logger.setLevel(logging.WARNING)
+        # --- End logger init ---
+        
         # --- Store Custom Params Temporarily --- #
         # We store them first, then ensure they are in the config before super().__init__
         # and finally reload them from the config after super().__init__ in case a params file was loaded.
@@ -179,18 +186,29 @@ class StructuredREMI(REMI):
             tokenizer_config.additional_params['use_filtered_ccs'] = _use_filtered_ccs
             tokenizer_config.additional_params['cc_filter_mode'] = _cc_filter_mode
             tokenizer_config.additional_params['cc_list'] = list(_explicit_cc_list)
-            tokenizer_config.additional_params['num_cc_bins'] = _num_cc_bins
+            # Only set default if not already present in the passed config
+            if 'num_cc_bins' not in tokenizer_config.additional_params:
+                 tokenizer_config.additional_params['num_cc_bins'] = _num_cc_bins
+                 self.logger.debug(f"Setting 'num_cc_bins' to default value: {_num_cc_bins}")
+            else:
+                 # If present, use the value from the config and update _num_cc_bins
+                 # so that the .get() fallback later uses the correct value if needed.
+                 _num_cc_bins = tokenizer_config.additional_params['num_cc_bins']
+                 self.logger.debug(f"Using 'num_cc_bins' ({_num_cc_bins}) from provided tokenizer_config.")
         # If only params is provided, the loaded config might not have our custom params yet.
         # We'll handle loading them *after* super().__init__
 
         # --- Call Parent Init --- #
+        # Needs to happen before logger is initialized if parent uses it, but after config mods
         # Note: Removed max_bar_embedding direct param, handled by config
         super().__init__(tokenizer_config, params)
 
-        # --- Setup Post Parent Init --- #
+        # --- Setup Post Parent Init --- # 
+        # --- Initialize logger right after superclass init ---
         self.logger = logging.getLogger(__name__)
-        print(f"DEBUG: Logger name is {__name__}")
-        self.logger.setLevel(logging.DEBUG)
+        # print(f"DEBUG: Logger name is {__name__}") # Optional print
+        self.logger.setLevel(logging.WARNING)
+        # --- End logger init ---
 
         # *** ADDED CHECK: Ensure additional_params exists after super init ***
         if not hasattr(self.config, 'additional_params') or self.config.additional_params is None:
@@ -211,17 +229,23 @@ class StructuredREMI(REMI):
                  raise AttributeError("self.config is None after parent initialization.")
 
 
-        # Reload custom attributes from config's additional_params.
-        # This handles the case where tokenizer_config was None but params was provided,
-        # or updates the attributes if both were provided.
+        # Reload custom attributes from the *final* config (self.config)
+        # Use the temporarily stored defaults (_use_track_names, _num_cc_bins, etc.) as fallbacks
         self.use_track_names = self.config.additional_params.get('use_track_names', _use_track_names)
         self.use_global_chords = self.config.additional_params.get('use_global_chords', _use_global_chords)
         self.use_filtered_ccs = self.config.additional_params.get('use_filtered_ccs', _use_filtered_ccs)
         self.cc_filter_mode = self.config.additional_params.get('cc_filter_mode', _cc_filter_mode)
-        # Ensure loaded cc_list is converted back to a set
         loaded_cc_list = self.config.additional_params.get('cc_list', list(_explicit_cc_list))
         self.explicit_cc_list = set(loaded_cc_list)
-        self.num_cc_bins = self.config.additional_params.get('num_cc_bins', _num_cc_bins)
+        # Load num_cc_bins from the final config, falling back to the initial default (_num_cc_bins = 32)
+        # only if it's not present in the final config.
+        loaded_num_bins = self.config.additional_params.get('num_cc_bins', _num_cc_bins) 
+        if loaded_num_bins != _num_cc_bins:
+             self.logger.info(f"Overriding initial num_cc_bins ({_num_cc_bins}) with value from loaded config: {loaded_num_bins}")
+        self.num_cc_bins = loaded_num_bins
+        # --- Force update the config object itself --- 
+        self.config.additional_params['num_cc_bins'] = self.num_cc_bins
+        self.logger.info(f"Final effective num_cc_bins set to: {self.num_cc_bins}") # Log the final value
 
         # CC Instrument Map Initialization (remains the same logic as before)
         self.cc_instrument_map: Dict[str, Set[int]] = {}

@@ -26,7 +26,7 @@ except ImportError:
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Ensure this module's logger is at DEBUG level
+logger.setLevel(logging.WARNING)  # Ensure this module's logger is at DEBUG level
 logging.getLogger('mido').setLevel(logging.ERROR)
 if MUSIC21_AVAILABLE:
     # Suppress music21 verbose output if desired
