@@ -23,7 +23,10 @@ from symusic import (
     TimeSignature,
     Track,
     ControlChange,
+    TextMeta,
 )
+from symusic.core import NoteTickList
+import symusic
 
 from miditok.classes import Event, TokenizerConfig, TokSequence
 from miditok.constants import (
@@ -43,8 +46,11 @@ from ..utils.structured_utils import (
     extract_chord_events,
     TOKENIZER_EXPECTED_QUALITIES,
     TARGET_INSTRUMENT_FAMILIES,
-    map_track_name_to_family
+    map_track_name_to_family,
+    MUSIC21_AVAILABLE # Import the flag
 )
+
+# --- Custom Event Types ---
 
 class TrackNameEvent(Event):
     """Represents a track name"""
@@ -87,10 +93,53 @@ class CCValueEvent(Event):
     def __repr__(self):
         return f"CCValue(time={self.time}, value={self.value})"
 
+class RomanNumeralEvent(Event):
+    """Represents a Roman Numeral analysis result"""
+    def __init__(self, figure: str, time: int = 0):
+        # Sanitize figure: replace slashes, sharps, flats etc. for token compatibility
+        sanitized_figure = figure.replace('#', 'sharp').replace('b', 'flat').replace('/', 'slash')
+        super().__init__("RomanNumeral", sanitized_figure, time)
+
+    def __repr__(self):
+        return f"RomanNumeral(time={self.time}, value={self.value})"
+
+class NeoRiemannianEvent(Event):
+    """Represents a Neo-Riemannian transformation"""
+    def __init__(self, transformation: str, time: int = 0):
+        # Transformation value should already be simple (P, L, R)
+        super().__init__("NeoRiemannian", transformation, time)
+
+    def __repr__(self):
+        return f"NeoRiemannian(time={self.time}, value={self.value})"
+
+# --- Predefined Sets for Vocabulary ---
+# Common Roman Numeral figures (can be expanded)
+# Need to sanitize these according to the RomanNumeralEvent logic
+# Example: V/V -> VslashV, viio -> viio, V7 -> V7, iv6 -> iv6
+COMMON_ROMAN_NUMERALS = {
+    # Major Key (examples)
+    "I", "ii", "iii", "IV", "V", "vi", "viio",
+    "I6", "ii6", "iii6", "IV6", "V6", "vi6",
+    "I64", "ii64", "iii64", "IV64", "V64", "vi64",
+    "V7", "viio7", "VslashV", "V7slashV", "viioslashV",
+    # Minor Key (examples)
+    "i", "iio", "III", "iv", "V", "VI", "VII", "viio",
+    "i6", "iio6", "III6", "iv6", "V6", "VI6", "VII6",
+    "i64", "iio64", "III64", "iv64", "V64", "VI64", "VII64",
+    "V7", "viio7", "III+", # Add augmented III
+    # Others (Neapolitan, etc.)
+    "flatII", "flatII6",
+    # Mode mixture examples
+    "iv", "flatVI", "flatVII", # in Major
+    "VI", # Picardy in minor
+}
+COMMON_NEO_RIEMANNIAN = {"P", "L", "R"} # Basic P, L, R
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+PITCH_CLASS_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 class StructuredREMI(REMI):
     r"""
@@ -127,6 +176,9 @@ class StructuredREMI(REMI):
         cc_list: Optional[List[int]] = None,
         cc_bins: int = 32,
         chord_analysis_func: Optional[callable] = None,
+        # <<< New Flags >>>
+        use_roman_numerals: bool = True, # Default to False
+        use_neo_riemannian: bool = True, # Default to False
         # Original REMI params (max_bar_embedding handled via config)
         params: str | Path | None = None,
     ) -> None:
@@ -147,8 +199,16 @@ class StructuredREMI(REMI):
         _cc_filter_mode = cc_filter_mode
         _explicit_cc_list = set(cc_list) if cc_list is not None else set()
         _num_cc_bins = cc_bins
-        # Store chord analyzer, default to imported one
-        self.chord_analyzer = chord_analysis_func if chord_analysis_func is not None else extract_chord_events
+        # <<< Store new flags temporarily >>>
+        _use_roman_numerals = use_roman_numerals
+        _use_neo_riemannian = use_neo_riemannian
+
+        # --- Music21 Requirement Check ---
+        if (_use_global_chords or _use_roman_numerals or _use_neo_riemannian) and not MUSIC21_AVAILABLE:
+            raise ImportError(
+                "'use_global_chords', 'use_roman_numerals', or 'use_neo_riemannian' requires music21. "
+                "Please install it (`pip install music21`)."
+            )
 
         # --- Setup Config (Important: before super().__init__) --- #
         # Provide a default config if none is given and no params file is specified
@@ -176,6 +236,9 @@ class StructuredREMI(REMI):
                     'cc_filter_mode': _cc_filter_mode,
                     'cc_list': list(_explicit_cc_list),
                     'num_cc_bins': _num_cc_bins,
+                    # <<< Add new flags to default config >>>
+                    'use_roman_numerals': _use_roman_numerals,
+                    'use_neo_riemannian': _use_neo_riemannian,
                 }
             )
         # If config is provided, ensure miditok CCs are off and store custom params
@@ -195,6 +258,9 @@ class StructuredREMI(REMI):
                  # so that the .get() fallback later uses the correct value if needed.
                  _num_cc_bins = tokenizer_config.additional_params['num_cc_bins']
                  self.logger.debug(f"Using 'num_cc_bins' ({_num_cc_bins}) from provided tokenizer_config.")
+            # <<< Store/update new flags in provided config >>>
+            tokenizer_config.additional_params['use_roman_numerals'] = _use_roman_numerals
+            tokenizer_config.additional_params['use_neo_riemannian'] = _use_neo_riemannian
         # If only params is provided, the loaded config might not have our custom params yet.
         # We'll handle loading them *after* super().__init__
 
@@ -246,6 +312,19 @@ class StructuredREMI(REMI):
         # --- Force update the config object itself --- 
         self.config.additional_params['num_cc_bins'] = self.num_cc_bins
         self.logger.info(f"Final effective num_cc_bins set to: {self.num_cc_bins}") # Log the final value
+
+        # <<< Reload new flags from final config >>>
+        self.use_roman_numerals = self.config.additional_params.get('use_roman_numerals', _use_roman_numerals)
+        self.use_neo_riemannian = self.config.additional_params.get('use_neo_riemannian', _use_neo_riemannian)
+        # <<< Update config with final flags >>>
+        self.config.additional_params['use_roman_numerals'] = self.use_roman_numerals
+        self.config.additional_params['use_neo_riemannian'] = self.use_neo_riemannian
+        self.logger.info(f"Final effective use_roman_numerals: {self.use_roman_numerals}")
+        self.logger.info(f"Final effective use_neo_riemannian: {self.use_neo_riemannian}")
+
+        # <<< Re-add chord analyzer assignment >>>
+        # Assign after config is settled, using the function passed in __init__ if provided
+        self.chord_analyzer = chord_analysis_func if chord_analysis_func is not None else extract_chord_events
 
         # CC Instrument Map Initialization (remains the same logic as before)
         self.cc_instrument_map: Dict[str, Set[int]] = {}
@@ -582,6 +661,7 @@ class StructuredREMI(REMI):
         # RESULTS
         tracks: dict[int, Track] = {}
         tempo_changes, time_signature_changes = [], []
+        chord_lyrics = [] # List to store chord lyrics events
 
         def check_inst(prog: int) -> None:
             if prog not in tracks:
@@ -637,6 +717,9 @@ class StructuredREMI(REMI):
             previous_pitch_onset = {prog: -128 for prog in self.config.programs}
             previous_pitch_chord = {prog: -128 for prog in self.config.programs}
             active_pedals = {}
+            # Variables to reconstruct chord lyrics
+            pending_chord_root = None
+            pending_chord_time = -1
 
             # Set track / sequence program if needed
             if not self.config.one_token_stream_for_programs:
@@ -665,6 +748,12 @@ class StructuredREMI(REMI):
             # Decode tokens
             for ti, token in enumerate(seq):
                 tok_type, tok_val = token.split("_")
+
+                # Reset pending chord if a new event occurs at a later time
+                if pending_chord_root is not None and current_tick > pending_chord_time:
+                    pending_chord_root = None
+                    pending_chord_time = -1
+
                 if token == "Bar_None":
                     current_bar += 1
                     if current_bar > 0:
@@ -825,6 +914,44 @@ class StructuredREMI(REMI):
                     else:
                         current_track.pitch_bends.append(new_pitch_bend)
 
+                # Handle GlobalChord* tokens
+                elif tok_type == "GlobalChordRoot":
+                    pending_chord_root = tok_val
+                    pending_chord_time = current_tick
+                    # We don't reset here if another root comes immediately
+
+                elif tok_type == "GlobalChordQual":
+                    if pending_chord_root is not None and current_tick == pending_chord_time:
+                        try:
+                            root_idx = int(pending_chord_root)
+                            if 0 <= root_idx < 12:
+                                root_name = PITCH_CLASS_NAMES[root_idx]
+                                lyric_text = f"{root_name}:{tok_val}"
+                                lyric = symusic.Lyric(time=current_tick, text=lyric_text)
+                                chord_lyrics.append(lyric)
+                            else:
+                                # Log warning for invalid root index
+                                pass
+                        except (ValueError, IndexError) as e:
+                            # Log warning if conversion fails
+                            pass
+                        finally:
+                            # Always reset after processing or attempting to process a Qual token
+                            pending_chord_root = None
+                            pending_chord_time = -1
+                    else:
+                        # Qual appeared without a matching Root at the same time, reset
+                        pending_chord_root = None
+                        pending_chord_time = -1
+
+                # Implicitly reset pending chord if any other token type appears
+                elif tok_type not in ["GlobalChordRoot", "GlobalChordQual"]:
+                     if pending_chord_root is not None:
+                         # This case should be covered by the time check at the start of the loop,
+                         # but added for extra safety.
+                         pending_chord_root = None
+                         pending_chord_time = -1
+
             # Add current_inst to score and handle notes still active
             if not self.config.one_token_stream_for_programs and not is_track_empty(
                 current_track
@@ -836,6 +963,13 @@ class StructuredREMI(REMI):
             score.tracks = list(tracks.values())
         score.tempos = tempo_changes
         score.time_signatures = time_signature_changes
+
+        # Add collected chord lyrics to the first track if it exists
+        if score.tracks:
+            # Sort lyrics by time just in case they were added out of order
+            # although current_tick should maintain order
+            chord_lyrics.sort(key=lambda x: x.time)
+            score.tracks[0].lyrics.extend(chord_lyrics)
 
         return score
 
@@ -919,6 +1053,20 @@ class StructuredREMI(REMI):
             vocab += [f"CCType_{i}" for i in range(128)]
             # CC Values (Binned)
             vocab += [f"CCValue_{i}" for i in range(num_cc_bins)]
+
+        # <<< Add Roman Numeral Tokens >>>
+        _use_roman_numerals = config_params.get('use_roman_numerals', True)
+        if _use_roman_numerals:
+            # Use the predefined set, assuming figures are already sanitized
+            vocab += [f"RomanNumeral_{figure}" for figure in COMMON_ROMAN_NUMERALS]
+            vocab.append("RomanNumeral_None") # Add a token for cases where analysis fails
+
+        # <<< Add Neo-Riemannian Tokens >>>
+        _use_neo_riemannian = config_params.get('use_neo_riemannian', True)
+        if _use_neo_riemannian:
+            vocab += [f"NeoRiemannian_{trans}" for trans in COMMON_NEO_RIEMANNIAN]
+            vocab.append("NeoRiemannian_None") # Add a token for no transformation
+
         # --- End Custom Tokens --- #
 
         return vocab

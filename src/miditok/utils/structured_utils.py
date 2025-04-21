@@ -224,22 +224,31 @@ def map_track_name_to_family(track_name: Optional[str]) -> str:
 # --- Chord Analysis Constants and Functions (from music_theory.py) ---
 
 # Updated list of qualities expected by the tokenizer
-TOKENIZER_EXPECTED_QUALITIES = {'maj', 'min', 'dim', 'aug', 'dom7', 'maj7', 'min7', 'sus4', 'sus2', 'other'}
+TOKENIZER_EXPECTED_QUALITIES = {
+    # Basic Triads & 7ths
+    'maj', 'min', 'dim', 'aug', 'dom7', 'maj7', 'min7',
+    # Suspended
+    'sus4', 'sus2',
+    # Extended & Altered
+    'm7b5', 'dim7', 'maj6', 'min6', 'dom9', 'maj9', 'min9',
+    'dom11', 'maj11', 'min11', 'dom13', 'maj13', 'min13',
+    'power', 'aug7', 'augMaj7',
+    # Fallback
+    'other'
+}
 
 def standardize_chord_quality(chord: music21.chord.Chord) -> str:
     """
-    Standardizes music21 chord quality to a common format matching tokenizer vocabulary.
-    Tries to identify common triads, sevenths, and suspended chords.
+    Standardizes music21 chord quality to a common format matching TOKENIZER_EXPECTED_QUALITIES.
+    Tries common triads, sevenths, sixths, ninths, 11ths, 13ths, suspended, augmented, power, etc.
     Includes error handling for non-standard chord objects.
     """
     if not MUSIC21_AVAILABLE or not isinstance(chord, music21.chord.Chord):
         return "other"
 
-    quality = "other" # Default
     try:
-        # Use music21's quality detection where possible
+        # --- Direct Quality Mapping ---
         m21_quality = chord.quality
-        # Map music21 qualities to our standard set
         if m21_quality == 'major': return "maj"
         if m21_quality == 'minor': return "min"
         if m21_quality == 'diminished': return "dim"
@@ -247,292 +256,294 @@ def standardize_chord_quality(chord: music21.chord.Chord) -> str:
         if m21_quality == 'dominant-seventh': return "dom7"
         if m21_quality == 'major-seventh': return "maj7"
         if m21_quality == 'minor-seventh': return "min7"
-        # Less common but possible music21 qualities
-        if m21_quality == 'half-diminished': # Often maps to min7b5
-             return "other" # Or add m7b5 to TOKENIZER_EXPECTED_QUALITIES
-        if m21_quality == 'diminished-seventh':
-             return "dim" # Often simplified, or add dim7 to expected
+        if m21_quality == 'half-diminished': return "m7b5"
+        if m21_quality == 'diminished-seventh': return "dim7"
+        if m21_quality == 'major-sixth': return "maj6"
+        if m21_quality == 'minor-sixth': return "min6"
+        if m21_quality == 'dominant-ninth': return "dom9"
+        if m21_quality == 'major-ninth': return "maj9"
+        if m21_quality == 'minor-ninth': return "min9"
+        # Music21 quality doesn't typically distinguish 11ths/13ths directly? Rely on names/intervals.
+        if m21_quality == 'augmented-seventh': return "aug7"
+        if m21_quality == 'augmented-major-seventh': return "augMaj7"
 
-        # If quality is unknown or 'other', check intervals manually for sus etc.
-        if m21_quality in ['other', 'unknown']:
-            if chord.isSuspendedTriad(): # Check for sus4/sus2 specifically
-                # Check intervals to differentiate sus2/sus4
-                interval_classes = sorted([i.midi % 12 for i in chord.notes])
-                root_pc = chord.root().pitchClass
-                relative_intervals = sorted([(pc - root_pc + 12) % 12 for pc in interval_classes])
-                if relative_intervals == [0, 5, 7]: return "sus4"
-                if relative_intervals == [0, 2, 7]: return "sus2"
+        # --- Interval/Name-Based Mapping (if direct quality failed or insufficient) ---
+        # Check suspended explicitly
+        if chord.isSuspendedTriad():
+            # Check intervals to differentiate sus2/sus4 (relative to root)
+            root_pc = chord.root().pitchClass
+            relative_intervals = sorted([(note.pitch.pitchClass - root_pc + 12) % 12 for note in chord.notes])
+            if 5 in relative_intervals and 7 in relative_intervals: return "sus4" # Check for P4, P5
+            if 2 in relative_intervals and 7 in relative_intervals: return "sus2" # Check for M2, P5
 
-        # Fallback based on common names if quality mapping failed
+        # Check power chord (root and fifth only)
+        if chord.isPowerChord(): return "power"
+
+        # Fallback to common names for more complex chords (11ths, 13ths)
         try:
             common_name = chord.commonName.lower()
-            # Check simple names first
-            if 'maj' in common_name and 'min' not in common_name: return "maj"
-            if 'min' in common_name and 'maj' not in common_name: return "min"
-            if 'dim' in common_name: return "dim"
-            if 'aug' in common_name: return "aug"
-            # Check seventh chords (be careful with order)
-            if 'dominant-seventh' in common_name: return "dom7"
-            if 'major-seventh' in common_name: return "maj7"
-            if 'minor-seventh' in common_name: return "min7"
-            if 'sus' in common_name:
-                 # Need interval check again if just 'sus' found
-                 interval_classes = sorted([i.midi % 12 for i in chord.notes])
-                 root_pc = chord.root().pitchClass
-                 relative_intervals = sorted([(pc - root_pc + 12) % 12 for pc in interval_classes])
-                 if relative_intervals == [0, 5, 7]: return "sus4"
-                 if relative_intervals == [0, 2, 7]: return "sus2"
+            # Use specific common names if available
+            if 'dominant-11th' in common_name: return "dom11"
+            if 'major-11th' in common_name: return "maj11"
+            if 'minor-11th' in common_name: return "min11"
+            if 'dominant-13th' in common_name: return "dom13"
+            if 'major-13th' in common_name: return "maj13"
+            if 'minor-13th' in common_name: return "min13"
+            # Re-check simpler ones if direct quality missed them somehow
+            if 'major-sixth' in common_name: return "maj6"
+            if 'minor-sixth' in common_name: return "min6"
+            if 'augmented-seventh' in common_name: return "aug7"
+            if 'augmented-major-seventh' in common_name: return "augMaj7"
+            # Handle potential variations like 'half-diminished seventh' -> m7b5
+            if 'half-diminished' in common_name: return "m7b5"
 
         except AttributeError: pass # commonName might fail
 
+        # --- Final Interval Checks (Less reliable, use as last resort) ---
+        # Example: check for augmented triad if quality='other' but intervals match
+        if m21_quality == 'other':
+            root_pc = chord.root().pitchClass
+            relative_intervals = sorted([(note.pitch.pitchClass - root_pc + 12) % 12 for note in chord.notes])
+            # Check interval content for basic types missed earlier
+            has_major_third = 4 in relative_intervals
+            has_minor_third = 3 in relative_intervals
+            has_perfect_fifth = 7 in relative_intervals
+            has_dim_fifth = 6 in relative_intervals
+            has_aug_fifth = 8 in relative_intervals
+
+            if has_major_third and has_aug_fifth: return "aug"
+            if has_minor_third and has_dim_fifth: return "dim"
+            # Could add more checks here but they get complex and overlap with above checks
+
         # If nothing matched, return the default 'other'
-        return quality
+        logger.debug(f"Chord {chord} with quality '{m21_quality}' and common name '{getattr(chord, 'commonName', 'N/A')}' mapped to 'other'")
+        return "other"
 
     except Exception as e:
         logger.warning(f"Could not standardize chord quality for {chord} due to unexpected error: {e}")
         return "other"
 
+def get_neo_riemannian_transformation(chord1: music21.chord.Chord, chord2: music21.chord.Chord) -> Optional[str]:
+    """
+    Calculates the Neo-Riemannian transformation (P, L, R) between two major/minor triads.
+
+    Args:
+        chord1: The first music21 Chord object (must be major or minor triad).
+        chord2: The second music21 Chord object (must be major or minor triad).
+
+    Returns:
+        The transformation type ("P", "L", "R") or None if not applicable or chords are not major/minor triads.
+    """
+    if not MUSIC21_AVAILABLE or chord1 is None or chord2 is None:
+        return None
+
+    # Check if both are major or minor triads
+    quality1 = chord1.quality
+    quality2 = chord2.quality
+    is_triad1 = quality1 in ["major", "minor"] and len(chord1.pitches) == 3
+    is_triad2 = quality2 in ["major", "minor"] and len(chord2.pitches) == 3
+
+    if not (is_triad1 and is_triad2):
+        return None
+
+    root1_pc = chord1.root().pitchClass
+    root2_pc = chord2.root().pitchClass
+    interval_semitones = abs(root1_pc - root2_pc)
+    # Handle wrap-around distance
+    if interval_semitones > 6: interval_semitones = 12 - interval_semitones
+
+    # P (Parallel): Same root, quality change
+    if root1_pc == root2_pc and quality1 != quality2:
+        return "P"
+
+    # L (Leading-Tone): Root moves by semitone (1), quality change
+    if interval_semitones == 1 and quality1 != quality2:
+        return "L"
+
+    # R (Relative): Root moves by minor third (3) for maj->min, or major third (4) for min->maj. Quality must match.
+    if quality1 == "major" and quality2 == "minor" and interval_semitones == 3: # Maj -> Min (e.g. Cmaj -> Amin)
+        # Check relative relationship (root distance)
+        if (root1_pc - root2_pc + 12) % 12 == 3:
+             return "R"
+    if quality1 == "minor" and quality2 == "major" and interval_semitones == 4: # Min -> Maj (e.g. Amin -> Cmaj)
+        # Check relative relationship (root distance)
+        if (root2_pc - root1_pc + 12) % 12 == 4:
+             return "R"
+
+    # Other transformations (S, N, H) are more complex and not implemented here.
+    return None
 
 def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
     """
-    Extract chord events (root_pc, quality, time) from a symusic.Score.
-    Uses music21 if available (via temporary file), otherwise falls back to basic mido analysis.
+    Extract chord events (root_pc, quality, time, roman_numeral, neo_riemannian)
+    from a symusic.Score. Requires music21 for analysis.
+    Saves score to a temporary MIDI file for processing.
 
     Args:
         score: The symusic.Score object to analyze.
 
     Returns:
         A list of dictionaries, each representing a chord event:
-        {'root_pc': int (0-11), 'quality': str, 'time': int (ticks)}
+        {'root_pc': int (0-11), 'quality': str, 'time': int (ticks),
+         'roman_numeral': Optional[str], 'neo_riemannian': Optional[str]}
+        Returns empty list if music21 is unavailable or analysis fails.
     """
-    print("\n=== Starting extract_chord_events ===")
+    print("\n=== Starting extract_chord_events (music21 required) ===")
     print(f"Score time division: {score.ticks_per_quarter}")
     print(f"Score tracks: {len(score.tracks)}")
     print(f"Music21 available: {MUSIC21_AVAILABLE}")
-    
+
+    if not MUSIC21_AVAILABLE:
+        logger.error("music21 is required for chord analysis but not found. Skipping chord extraction.")
+        return []
+
     chord_events = []
     ticks_per_quarter = score.ticks_per_quarter
+    temp_midi_file = None
 
-    # --- Method 1: music21 (preferred) ---
-    if MUSIC21_AVAILABLE:
-        # music21 needs a file path, so dump the symusic score to a temporary MIDI file
-        temp_midi_file = None
-        try:
-            print("\nTrying music21 analysis...")
-            with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp_midi:
-                temp_midi_file = tmp_midi.name
-                print(f"Created temp file: {temp_midi_file}")
-                score.dump_midi(temp_midi_file) # Use symusic's dump method
-
-            # Parse the temporary file with music21
-            print("Parsing with music21...")
-            m21_score = music21.converter.parse(temp_midi_file)
-            # Use chordify to find chords
-            print("Chordifying score...")
-            chordified_score = m21_score.chordify()
-
-            print("\nExtracting chords...")
-            chord_count = 0
-            quality_counts = defaultdict(int)
-            root_counts = defaultdict(int)
-            
-            for element in chordified_score.recurse().getElementsByClass('Chord'):
-                if not element.isRest: # Ignore rests that might be chordified
-                    try:
-                        # Standardize quality FIRST
-                        quality = standardize_chord_quality(element)
-                        quality_counts[quality] += 1
-                        
-                        # Ensure quality is one of the expected ones
-                        if quality not in TOKENIZER_EXPECTED_QUALITIES: quality = 'other'
-
-                        root = element.root()
-                        if root is None: 
-                            print(f"No root found for chord: {element}")
-                            continue # Skip if no root found
-
-                        root_pc = root.pitchClass # 0-11
-                        root_counts[root_pc] += 1
-                        # Convert music21 offset (quarter notes) to ticks
-                        time_ticks = int(round(element.offset * ticks_per_quarter))
-
-                        # Avoid duplicate chords at the exact same time
-                        is_duplicate = False
-                        if chord_events and chord_events[-1]['time'] == time_ticks:
-                             is_duplicate = True
-
-                        if not is_duplicate:
-                             chord_events.append({
-                                 "root_pc": root_pc,
-                                 "quality": quality,
-                                 "time": time_ticks # Use 'time' key consistent with MidiTok events
-                             })
-                             chord_count += 1
-                             if chord_count % 10 == 0:
-                                 print(f"Processed {chord_count} chords...")
-                    except Exception as inner_e:
-                        print(f"Failed extracting/processing music21 chord element {element}: {inner_e}")
-                        continue # Skip this chord
-
-            print("\nChord analysis summary:")
-            print(f"Total chords found: {chord_count}")
-            print(f"Quality distribution: {dict(quality_counts)}")
-            print(f"Root distribution: {dict(root_counts)}")
-            
-            # Sort by time as chordify might not preserve perfect order
-            chord_events.sort(key=lambda x: x['time'])
-            # Clean up temp file
-            if temp_midi_file: os.unlink(temp_midi_file)
-            return chord_events
-
-        except Exception as e:
-            print(f"Music21 chord analysis failed: {e}")
-            print("Stack trace:")
-            traceback.print_exc()
-            # Clean up temp file in case of error
-            if temp_midi_file and os.path.exists(temp_midi_file): os.unlink(temp_midi_file)
-            # Fall through to mido fallback
-
-    # --- Method 2: mido Fallback (if music21 failed or unavailable) ---
-    print("\nUsing mido fallback for chord extraction (no root info, less reliable).")
-    temp_midi_file_mido = None
     try:
-        # Need to dump to file for mido as well
+        print("\nRunning music21 analysis...")
         with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp_midi:
-            temp_midi_file_mido = tmp_midi.name
-            print(f"Created temp file for mido: {temp_midi_file_mido}")
-            score.dump_midi(temp_midi_file_mido)
+            temp_midi_file = tmp_midi.name
+            print(f"Created temp file: {temp_midi_file}")
+            score.dump_midi(temp_midi_file) # Use symusic's dump method
 
-        midi = mido.MidiFile(temp_midi_file_mido)
-        current_time_ticks = 0
-        # {track_idx: {channel: {note: time_on}}} - Track separation is important
-        active_notes_by_track_channel = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        # Parse the temporary file with music21
+        print("Parsing with music21...")
+        m21_score = music21.converter.parse(temp_midi_file)
+        # Use chordify to find chords
+        print("Chordifying score...")
+        # Consider chordifying options: addPartIdAsGroup=True ?
+        chordified_score = m21_score.chordify()
 
-        # Heuristic parameters
-        SIMULTANEITY_THRESHOLD_TICKS = int(ticks_per_quarter / 16) # Shorter threshold (e.g., 64th note)
-        MIN_CHORD_NOTES = 3
+        # --- Key Analysis ---
+        print("\nAnalyzing key...")
+        key = None
+        try:
+            key = m21_score.analyze('key')
+            print(f"Key analysis result: {key}")
+        except Exception as key_err:
+            print(f"Key analysis failed: {key_err}")
+            key = None # Ensure key is None if analysis fails
 
-        potential_chords = [] # Store groups of potentially simultaneous notes with their time
+        print("\nExtracting chords, Roman numerals, and Neo-Riemannian transformations...")
+        chord_count = 0
+        rn_count = 0
+        nr_count = 0
+        quality_counts = defaultdict(int)
+        root_counts = defaultdict(int)
+        previous_chord = None # Store the previous chord for NR analysis
 
-        print("\nAnalyzing MIDI tracks...")
-        for track_idx, track in enumerate(midi.tracks):
-             print(f"\nProcessing track {track_idx}")
-             current_time_ticks = 0 # Reset time for each track
-             notes_in_track = 0
-             for msg in track:
-                 current_time_ticks += msg.time
-                 channel = getattr(msg, 'channel', 0) # Default channel 0
+        # Recurse once and store chords to avoid repeated recursion
+        all_chord_elements = list(chordified_score.recurse().getElementsByClass('Chord'))
+        print(f"Found {len(all_chord_elements)} potential chord elements.")
 
-                 if msg.type == 'note_on' and msg.velocity > 0:
-                     active_notes_by_track_channel[track_idx][channel][msg.note] = current_time_ticks
-                     notes_in_track += 1
-                 elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                     if msg.note in active_notes_by_track_channel[track_idx][channel]:
-                         # Mark note off time? Or just remove? Removing is simpler.
-                         del active_notes_by_track_channel[track_idx][channel][msg.note]
+        for element in all_chord_elements:
+            if not element.isRest: # Ignore rests that might be chordified
+                current_chord_data = {}
+                try:
+                    # Standardize quality FIRST
+                    quality = standardize_chord_quality(element)
+                    quality_counts[quality] += 1
 
-                 # Snapshot active notes *within the current track* at this time step
-                 # Collect notes that started recently across channels within this track
-                 current_simultaneous_notes_in_track = []
-                 start_time_for_chord = float('inf')
-                 active_notes_details = [] # Store (note, start_time)
+                    # Ensure quality is one of the expected ones (redundant if standardize handles it, but safe)
+                    if quality not in TOKENIZER_EXPECTED_QUALITIES:
+                        logger.warning(f"Standardized quality '{quality}' not in expected set for {element}. Using 'other'.")
+                        quality = 'other'
 
-                 for ch, notes_dict in active_notes_by_track_channel[track_idx].items():
-                     for note, time_on in notes_dict.items():
-                         active_notes_details.append((note, time_on))
+                    root = element.root()
+                    if root is None:
+                        logger.debug(f"Skipping chord element (no root): {element}")
+                        previous_chord = None # Reset previous if current is invalid
+                        continue # Skip if no root found
 
-                 # Sort by start time to find the earliest start time of potentially simultaneous notes
-                 active_notes_details.sort(key=lambda x: x[1])
+                    root_pc = root.pitchClass # 0-11
+                    root_counts[root_pc] += 1
+                    # Convert music21 offset (quarter notes) to ticks
+                    time_ticks = int(round(element.offset * ticks_per_quarter))
 
-                 # Check for notes starting within the threshold of the *earliest* note in the potential chord
-                 if active_notes_details:
-                      potential_chord_start_time = active_notes_details[0][1]
-                      for note, time_on in active_notes_details:
-                           if time_on - potential_chord_start_time <= SIMULTANEITY_THRESHOLD_TICKS:
-                                current_simultaneous_notes_in_track.append(note)
-                                start_time_for_chord = min(start_time_for_chord, time_on)
+                    current_chord_data = {
+                        "root_pc": root_pc,
+                        "quality": quality,
+                        "time": time_ticks,
+                        "roman_numeral": None,
+                        "neo_riemannian": None
+                    }
 
-                 if len(current_simultaneous_notes_in_track) >= MIN_CHORD_NOTES:
-                     # Try to detect quality (root cannot be determined reliably here)
-                     notes_for_quality = sorted(list(set(current_simultaneous_notes_in_track)))
-                     quality = detect_chord_quality_basic(notes_for_quality) # Use simplified quality detector
+                    # --- Roman Numeral Analysis ---
+                    if key:
+                        try:
+                            # Allow minor chords identified as major (e.g., V in minor)
+                            rn_obj = music21.roman.romanNumeralFromChord(element, key, ignoreDiminishedMinorQuality=True)
+                            rn_figure = rn_obj.figure # Get the figure (e.g., 'V7', 'viio')
+                            # Basic cleaning: remove spaces often added by music21
+                            rn_figure_cleaned = rn_figure.replace(' ', '')
+                            current_chord_data['roman_numeral'] = rn_figure_cleaned
+                            rn_count += 1
+                        except music21.roman.RomanNumeralException as rn_err:
+                            logger.debug(f"Could not determine Roman Numeral for {element} in key {key}: {rn_err}")
+                        except Exception as rn_err_general:
+                             logger.warning(f"Unexpected error during Roman Numeral analysis for {element}: {rn_err_general}")
 
-                     if quality and quality != 'other': # Only add if a basic quality is detected
-                          # Ensure quality is one of the expected ones
-                          if quality not in TOKENIZER_EXPECTED_QUALITIES: quality = 'other'
+                    # --- Neo-Riemannian Analysis ---
+                    if previous_chord: # Check only if there was a valid previous chord
+                         try:
+                             nr_label = get_neo_riemannian_transformation(previous_chord, element)
+                             if nr_label:
+                                 current_chord_data['neo_riemannian'] = nr_label
+                                 nr_count += 1
+                         except Exception as nr_err:
+                              logger.warning(f"Error during Neo-Riemannian analysis between {previous_chord} and {element}: {nr_err}")
 
-                          # Add potential chord, avoid duplicates at nearly the same time
-                          is_duplicate = False
-                          # Check against the last few chords added
-                          for existing_chord in reversed(potential_chords[-5:]): # Check last 5
-                              # Check if same quality and very close time
-                              if existing_chord['quality'] == quality and \
-                                 abs(existing_chord['time'] - start_time_for_chord) <= SIMULTANEITY_THRESHOLD_TICKS:
-                                  is_duplicate = True
-                                  break
-                              # Optimization: If we've gone back further in time, stop checking
-                              if existing_chord['time'] < start_time_for_chord - SIMULTANEITY_THRESHOLD_TICKS:
-                                   break
+                    # --- Duplicate Check & Append ---
+                    # Avoid duplicate full entries (including RN/NR) at the exact same time
+                    is_duplicate = False
+                    if chord_events and chord_events[-1]['time'] == time_ticks:
+                         # Compare all relevant fields now
+                         if (chord_events[-1]['root_pc'] == root_pc and
+                             chord_events[-1]['quality'] == quality and
+                             chord_events[-1]['roman_numeral'] == current_chord_data['roman_numeral'] and
+                             chord_events[-1]['neo_riemannian'] == current_chord_data['neo_riemannian']):
+                            is_duplicate = True
 
-                          if not is_duplicate:
-                              potential_chords.append({
-                                  "root_pc": -1, # Indicate root is unknown
-                                  "quality": quality,
-                                  "time": start_time_for_chord
-                              })
-             
-             print(f"Found {notes_in_track} notes in track {track_idx}")
+                    if not is_duplicate:
+                        chord_events.append(current_chord_data)
+                        chord_count += 1
+                        if chord_count % 50 == 0: # Log less frequently
+                            print(f"Processed {chord_count} chords ({rn_count} RNs, {nr_count} NRs)...")
+                        previous_chord = element # Store current chord for next iteration's NR check
+                    else:
+                         # If duplicate, still update previous_chord to the latest one at this time
+                         previous_chord = element
 
-        # Sort all found potential chords by time and return
-        potential_chords.sort(key=lambda x: x['time'])
-        print(f"\nFound {len(potential_chords)} potential chords using mido fallback")
+                except Exception as inner_e:
+                    print(f"Failed extracting/processing music21 chord element {element}: {inner_e}")
+                    traceback.print_exc(limit=1) # Print limited traceback for inner error
+                    previous_chord = None # Reset previous if current is invalid
+                    continue # Skip this chord
+            else:
+                 # If element is a rest, reset previous_chord context
+                 previous_chord = None
+
+        print("\nChord analysis summary:")
+        print(f"Total unique chord events generated: {chord_count}")
+        print(f"Roman numerals identified: {rn_count}")
+        print(f"Neo-Riemannian transformations identified: {nr_count}")
+        print(f"Quality distribution: {dict(quality_counts)}")
+        print(f"Root distribution: {dict(root_counts)}")
+
+        # Sort by time as chordify might not preserve perfect order (already sorted?)
+        chord_events.sort(key=lambda x: x['time'])
         # Clean up temp file
-        if temp_midi_file_mido: os.unlink(temp_midi_file_mido)
-        return potential_chords
+        if temp_midi_file: os.unlink(temp_midi_file)
+        print("\n=== Finished extract_chord_events ===")
+        return chord_events
 
     except Exception as e:
-        print(f"Mido fallback chord analysis failed: {e}")
+        print(f"Music21 chord analysis failed: {e}")
         print("Stack trace:")
         traceback.print_exc()
         # Clean up temp file in case of error
-        if temp_midi_file_mido and os.path.exists(temp_midi_file_mido): os.unlink(temp_midi_file_mido)
-        return [] # Return empty list on failure
-
-def detect_chord_quality_basic(notes: List[int]) -> str:
-    """
-    Simplified quality detection for mido fallback (no root context).
-    Tries to match basic triads/7ths based on pitch classes present. Less reliable.
-    Returns one of TOKENIZER_EXPECTED_QUALITIES or 'other'.
-    """
-    if len(notes) < 3: return "other"
-
-    pitch_classes = sorted(list(set(note % 12 for note in notes)))
-    num_pcs = len(pitch_classes)
-
-    # Check all pitch classes present as potential roots
-    for i in range(num_pcs):
-        root_pc = pitch_classes[i]
-        # Calculate intervals relative to this potential root
-        intervals = sorted([(pc - root_pc + 12) % 12 for pc in pitch_classes])
-
-        # Check against known interval patterns
-        # Prioritize more complex chords first if intervals match subset
-        if intervals == [0, 4, 7, 11]: return "maj7"
-        if intervals == [0, 3, 7, 10]: return "min7"
-        if intervals == [0, 4, 7, 10]: return "dom7"
-        # if intervals == [0, 3, 6, 9]: return "dim7" # Map to dim?
-        if intervals == [0, 3, 6, 10]: return "other" # m7b5 -> other
-        # if intervals == [0, 3, 7, 11]: return "minmaj7" # -> other
-
-        if intervals == [0, 4, 7]: return "maj"
-        if intervals == [0, 3, 7]: return "min"
-        if intervals == [0, 3, 6]: return "dim"
-        if intervals == [0, 4, 8]: return "aug"
-
-        # Sus chords check (need root context, but check patterns)
-        if intervals == [0, 5, 7]: return "sus4"
-        if intervals == [0, 2, 7]: return "sus2"
-
-    # Check common inversions or subsets (more complex logic needed here for reliability)
-
-    return "other" # Could not identify a common chord relative to any note as root
+        if temp_midi_file and os.path.exists(temp_midi_file): os.unlink(temp_midi_file)
+        # Return empty list on failure
+        return []
