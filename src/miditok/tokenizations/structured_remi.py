@@ -11,6 +11,7 @@ import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Union, Any, Tuple, Set
 from pathlib import Path
 from collections import defaultdict
+import sys # <<< Added import
 
 import numpy as np
 
@@ -49,6 +50,7 @@ from ..utils.structured_utils import (
     map_track_name_to_family,
     MUSIC21_AVAILABLE # Import the flag
 )
+import functools # <<< Add import
 
 # --- Custom Event Types ---
 
@@ -322,9 +324,35 @@ class StructuredREMI(REMI):
         self.logger.info(f"Final effective use_roman_numerals: {self.use_roman_numerals}")
         self.logger.info(f"Final effective use_neo_riemannian: {self.use_neo_riemannian}")
 
+        # --- FORCE DISABLE problematic features --- #
+        if self.use_roman_numerals:
+             self.logger.warning("Temporarily forcing use_roman_numerals to False due to potential music21 errors.")
+             self.use_roman_numerals = False
+             self.config.additional_params['use_roman_numerals'] = False
+        if self.use_neo_riemannian:
+             self.logger.warning("Temporarily forcing use_neo_riemannian to False due to potential music21 errors.")
+             self.use_neo_riemannian = False
+             self.config.additional_params['use_neo_riemannian'] = False
+        # --- END FORCE DISABLE ---
+
         # <<< Re-add chord analyzer assignment >>>
         # Assign after config is settled, using the function passed in __init__ if provided
-        self.chord_analyzer = chord_analysis_func if chord_analysis_func is not None else extract_chord_events
+        # If a custom function is passed, we can't easily pass the flags, so we only
+        # modify the default case using extract_chord_events.
+        if chord_analysis_func is not None:
+             self.chord_analyzer = chord_analysis_func # Use the custom one directly
+             self.logger.warning("Custom chord_analysis_func provided; cannot automatically pass analysis flags.")
+        else:
+             # Use functools.partial to preset the flags for the default extract_chord_events
+             # The flags used here (self.use_roman_numerals etc.) are the potentially
+             # modified ones (e.g., forced to False earlier in __init__)
+             self.chord_analyzer = functools.partial(extract_chord_events,
+                                                     analyze_roman_numerals=self.use_roman_numerals,
+                                                     analyze_neo_riemannian=self.use_neo_riemannian)
+             self.logger.info(f"Using default chord analyzer (extract_chord_events) with "
+                              f"analyze_roman_numerals={self.use_roman_numerals}, "
+                              f"analyze_neo_riemannian={self.use_neo_riemannian}")
+
 
         # CC Instrument Map Initialization (remains the same logic as before)
         self.cc_instrument_map: Dict[str, Set[int]] = {}
@@ -633,11 +661,7 @@ class StructuredREMI(REMI):
     def _units_between(start_tick: int, end_tick: int, ticks_per_unit: int) -> int:
         return (end_tick - start_tick) // ticks_per_unit
 
-    def _tokens_to_score(
-        self,
-        tokens: TokSequence | list[TokSequence],
-        programs: list[tuple[int, bool]] | None = None,
-    ) -> Score:
+    def _tokens_to_score(self, tokens: TokSequence | list[TokSequence], programs: list[tuple[int, bool]] | None = None) -> Score:
         r"""
         Convert tokens (:class:`miditok.TokSequence`) into a ``symusic.Score``.
 
@@ -1389,11 +1413,16 @@ class StructuredREMI(REMI):
     # --- Custom Event Generation Logic --- #
 
     def _score_to_events(self, score: Score) -> TokSequence:
-        print("\n=== Starting _score_to_events in StructuredREMI ===")
-        print(f"Score tracks: {len(score.tracks)}")
-        print(f"Score time division: {score.ticks_per_quarter}")
-        print(f"Score end time: {score.end()}")
-        print(f"Tokenizer config: {self.config}")
+        # <<< REMOVE DEBUG PRINT AT TOP >>>
+        #print("!*!*!* EXECUTING StructuredREMI._score_to_events *!*!*!")
+        #sys.stdout.flush()
+        # <<< END REMOVED DEBUG >>>
+
+        #print("\n=== Starting _score_to_events in StructuredREMI === (THIS VERSION)")
+        #print(f"Score tracks: {len(score.tracks)}")
+        #print(f"Score time division: {score.ticks_per_quarter}")
+        #print(f"Score end time: {score.end()}")
+        #print(f"Tokenizer config: {self.config}")
 
         # Sort tracks
         score.tracks.sort(key=lambda x: (x.program, x.is_drum))
@@ -1401,111 +1430,141 @@ class StructuredREMI(REMI):
         all_events: List[Event] = [] # Use a list to collect events
 
         # Global events (tempo, time sig, chords)
-        if self.config.use_tempos: 
-            print("\nProcessing tempo events...")
+        if self.config.use_tempos:
+            #print("\nProcessing tempo events...")
             tempo_events = self._tempo_events(score.tempos)
-            print(f"Generated {len(tempo_events)} tempo events")
+            #print(f"Generated {len(tempo_events)} tempo events")
             all_events += tempo_events
 
         if self.config.use_time_signatures:
-            print("\nProcessing time signature events...")
+            #print("\nProcessing time signature events...")
             ts_events = self._time_signature_events(score.time_signatures)
-            print(f"Generated {len(ts_events)} time signature events")
+            #print(f"Generated {len(ts_events)} time signature events")
             all_events += ts_events
 
         if self.use_global_chords:
-            print("\n=== Processing Global Chords ===")
+            #print("\n=== Processing Global Chords ===")
             chord_events_data = self.chord_analyzer(score)
-            print(f"Found {len(chord_events_data)} chord events")
-            
+            #print(f"Found {len(chord_events_data)} chord events")
+
             # Log chord distribution
-            chord_qualities = {}
-            chord_roots = {}
+            #chord_qualities = {}
+            #chord_roots = {}
+            filtered_chord_count = 0
+            time_zero_skipped = 0
             for chord_data in chord_events_data:
+                # Filter time-0 chords
+                time = chord_data.get('time')
+
+                # <<< Remove Checkpoint prints >>>
+                #print("DEBUG: CHECKPOINT 1 - Inside loop")
+                #sys.stdout.flush()
+                #time = chord_data.get('time')
+                #print("DEBUG: CHECKPOINT 2 - Got time value")
+                #sys.stdout.flush()
+                # <<< End Removed Prints >>>
+
+                if time == 0:
+                    #print(f"DEBUG: Skipping time 0 chord: {chord_data}")
+                    #sys.stdout.flush()
+                    time_zero_skipped += 1
+                    continue # Skip chords exactly at time 0
+
                 quality = chord_data.get('quality', 'other')
-                root_pc = chord_data.get('root_pc')
-                chord_qualities[quality] = chord_qualities.get(quality, 0) + 1
-                if root_pc is not None:
-                    chord_roots[root_pc] = chord_roots.get(root_pc, 0) + 1
-            
-            print(f"Chord quality distribution: {chord_qualities}")
-            print(f"Chord root distribution: {chord_roots}")
-            
-            for chord_data in chord_events_data:
-                print(f"\nProcessing chord: {chord_data}")
-                quality = chord_data.get('quality', 'other')
-                if quality not in self.valid_chord_qualities: 
-                    print(f"Remapping quality {quality} to 'other' (valid qualities: {sorted(list(self.valid_chord_qualities))})")
+                if quality not in self.valid_chord_qualities:
+                    #print(f"Remapping quality {quality} to 'other' (valid qualities: {sorted(list(self.valid_chord_qualities))})")
                     quality = 'other'
                 root_pc = chord_data.get('root_pc')
-                time = chord_data.get('time')
-                if root_pc is not None and time is not None:
-                    print(f"Adding chord event at time {time}: root={root_pc}, quality={quality}")
+                if root_pc is not None:
+                    #print(f"Adding chord event at time {time}: root={root_pc}, quality={quality}")
                     root_event = GlobalChordRootEvent(root_pc=root_pc, time=time)
                     qual_event = GlobalChordQualEvent(quality=quality, time=time)
-                    print(f"Created events: {root_event}, {qual_event}")
+                    #print(f"Created events: {root_event}, {qual_event}")
                     all_events.extend([root_event, qual_event])
-                else:
-                    print(f"Skipping chord event due to missing root_pc or time: {chord_data}")
+                    filtered_chord_count += 1
+                #else:
+                    #print(f"Skipping chord event due to missing root_pc or time: {chord_data}")
+            # Log skipped count (optional, keep if useful)
+            print(f"Skipped {time_zero_skipped} chord events occurring exactly at time 0.")
+            #print(f"Added {filtered_chord_count} chord events (Root+Qual pairs) to all_events.")
 
         # Track-specific events (notes, CCs, track names)
+        #print("\n=== Starting Track Event Processing ===")
+        total_track_event_count = 0
         for track_idx, track in enumerate(score.tracks):
-            print(f"\n=== Processing Track {track_idx} ===")
-            print(f"Program: {track.program}, Name: {track.name}")
+            #print(f"\n--- Processing Track {track_idx} (Program: {track.program}, Name: {track.name}) ---")
+            #sys.stdout.flush()
+
+            #print(f"Program: {track.program}, Name: {track.name}")
             # Set current track program and type for CC filtering
             self._current_track_program = track.program
-            # Map track name to family first
             mapped_family = map_track_name_to_family(track.name)
-            # Determine instrument type based on program (more reliable for CCs than name)
             self._current_track_instrument_type = get_instrument_type_from_program(track.program)
-            print(f"Mapped to family: {mapped_family}, instrument type: {self._current_track_instrument_type}")
+            #print(f"Mapped to family: {mapped_family}, instrument type: {self._current_track_instrument_type}")
 
             track_events = []
-            # Add TrackName event if enabled (at the start of track events)
             if self.use_track_names:
-                 track_events.append(TrackNameEvent(
-                     name=mapped_family,
-                     instrument_type=self._current_track_instrument_type,
-                     time=0
-                 ))
+                track_events.append(TrackNameEvent(
+                    name=mapped_family,
+                    instrument_type=self._current_track_instrument_type,
+                    time=0
+                ))
 
-            # Add program events
             program_events = self._program_events([track])
-            print(f"Generated {len(program_events)} program events")
+            #print(f"Generated {len(program_events)} program events")
             track_events += program_events
 
-            # Add note events
             note_events = self._note_events(track.notes)
-            print(f"Generated {len(note_events)} note events")
+            #print(f"Generated {len(note_events)} note events")
             track_events += note_events
 
-            # Add pedal events
             if self.config.use_sustain_pedals:
                 pedal_events = self._pedal_events(track.pedals)
-                print(f"Generated {len(pedal_events)} pedal events")
+                #print(f"Generated {len(pedal_events)} pedal events")
                 track_events += pedal_events
 
-            # Add pitch bend events
             if self.config.use_pitch_bends:
                 pb_events = self._pitch_bend_events(track.pitch_bends)
-                print(f"Generated {len(pb_events)} pitch bend events")
+                #print(f"Generated {len(pb_events)} pitch bend events")
                 track_events += pb_events
 
-            # Add our custom CC events
             if self.use_filtered_ccs and track.controls:
-                print(f"\nProcessing {len(track.controls)} CC events")
-                print(f"Filter mode: {self.cc_filter_mode}")
+                #print(f"\nProcessing {len(track.controls)} CC events")
+                #print(f"Filter mode: {self.cc_filter_mode}")
                 cc_events = self._create_control_change_events_filtered(track.controls)
-                print(f"Generated {len(cc_events)} CC events")
+                #print(f"Generated {len(cc_events)} CC events")
                 track_events += cc_events
 
-            # Append track events to all events
             all_events += track_events
-            print(f"Total events for track {track_idx}: {len(track_events)}")
+            #print(f"--- Finished Track {track_idx}: Added {len(track_events)} events ---")
+            total_track_event_count += len(track_events)
+            #sys.stdout.flush()
+            #print(f"Total events for track {track_idx}: {len(track_events)}")
+
+        #print(f"\n=== Finished Processing All Tracks: Added {total_track_event_count} track events ===")
+        #sys.stdout.flush()
+
+        # --- Remove logs around sorting as this method might not be called ---
+        #event_counts_before = defaultdict(int)
+        #for event in all_events:
+        #    event_counts_before[event.type_] += 1
+        #print("\n=== Event Counts Before Sorting (StructuredREMI version) ===")
+        #for event_type, count in sorted(event_counts_before.items()):
+        #    print(f"  {event_type}: {count}")
+        #sys.stdout.flush()
 
         # Sort all events by time, then priority, then type
         all_events.sort(key=lambda x: (x.time, self._event_priority.get(x.type_, 10), x.value))
-        print(f"\n=== Final Event Count: {len(all_events)} ===")
+        #print(f"\n=== Final Event Count (after collecting all, StructuredREMI version): {len(all_events)} ===")
+        #sys.stdout.flush()
+
+        #print("\n=== First 150 Events After Sorting (StructuredREMI version) ===")
+        #for i, event in enumerate(all_events[:150]):
+        #     print(f"  {i}: {event}")
+        #if len(all_events) > 150:
+        #     print(f"  ... ({len(all_events) - 150} more events)")
+        #sys.stdout.flush()
+        # --- END Remove logs --- 
 
         # Reset internal track state before processing (important if tokenizer is reused)
         self._current_track_instrument_type = "unknown"
@@ -1513,7 +1572,7 @@ class StructuredREMI(REMI):
 
         # Add time events (Bars, Positions, Rests)
         events_with_time = self._add_time_events(all_events, score.ticks_per_quarter)
-        print(f"Final event count after adding time events: {len(events_with_time)}")
+        #print(f"Final event count after adding time events: {len(events_with_time)}")
 
         # Create TokSequence
         tok_sequence = TokSequence(events=events_with_time)
@@ -1529,68 +1588,62 @@ class StructuredREMI(REMI):
         tok_sequence.convert_to_ids()
 
         # Print final token sequence
-        print("\n=== Final Token Sequence ===")
-        print("First 50 tokens:")
-        for i, token in enumerate(tok_sequence.tokens[:50]):
-            print(f"{i}: {token}")
-        if len(tok_sequence.tokens) > 50:
-            print(f"... ({len(tok_sequence.tokens) - 50} more tokens)")
+        #print("\n=== Final Token Sequence ===")
+        #print("First 50 tokens:")
+        #for i, token in enumerate(tok_sequence.tokens[:50]):
+        #    print(f"{i}: {token}")
+        #if len(tok_sequence.tokens) > 50:
+        #    print(f"... ({len(tok_sequence.tokens) - 50} more tokens)")
 
         return tok_sequence
 
     def _create_control_change_events_filtered(self, controls: List[ControlChange]) -> List[Event]:
         events = []
-        if not controls: 
-            print("No CC events to process")
+        if not controls:
+            #print("No CC events to process")
             return events
 
         allowed_ccs: Set[int]
         if self.cc_filter_mode == 'all':
             allowed_ccs = set(range(128))
-            print("Using 'all' CC filter mode - allowing all CCs")
+            #print("Using 'all' CC filter mode - allowing all CCs")
         elif self.cc_filter_mode == 'explicit_list':
             allowed_ccs = self.explicit_cc_list
-            print(f"Using explicit CC list: {sorted(list(allowed_ccs))}")
+            #print(f"Using explicit CC list: {sorted(list(allowed_ccs))}")
         elif self.cc_filter_mode == 'instrument_aware':
             allowed_ccs = self.cc_instrument_map.get(self._current_track_instrument_type,
                                                      self.cc_instrument_map["unknown"])
-            print(f"Using instrument-aware CC filtering for type {self._current_track_instrument_type}")
-            print(f"Allowed CCs for this instrument: {sorted(list(allowed_ccs))}")
+            #print(f"Using instrument-aware CC filtering for type {self._current_track_instrument_type}")
+            #print(f"Allowed CCs for this instrument: {sorted(list(allowed_ccs))}")
         else: # 'none' or invalid mode
-            print(f"Invalid CC filter mode '{self.cc_filter_mode}' - no CCs will be processed")
+            #print(f"Invalid CC filter mode '{self.cc_filter_mode}' - no CCs will be processed")
             return events
 
-        print(f"Processing {len(controls)} CC events")
+        #print(f"Processing {len(controls)} CC events")
         cc_types_seen = defaultdict(int)
         cc_values_seen = defaultdict(list)
-        
-        for control in controls:
-            print(f"Processing CC: number={control.number}, value={control.value}, time={control.time}")
-            if control.number in allowed_ccs:
-                # Track CC type usage
-                cc_types_seen[control.number] += 1
-                
-                # Ensure value is in valid MIDI range
-                value = min(max(control.value, 0), 127)
-                # Track CC values
-                cc_values_seen[control.number].append(value)
-                # Bin the value
-                binned_value = int((value / 127.0) * (self.num_cc_bins - 1))
-                print(f"CC {control.number} value {value} binned to {binned_value} (using {self.num_cc_bins} bins)")
 
+        for control in controls:
+            #print(f"Processing CC: number={control.number}, value={control.value}, time={control.time}")
+            if control.number in allowed_ccs:
+                cc_types_seen[control.number] += 1
+                value = min(max(control.value, 0), 127)
+                cc_values_seen[control.number].append(value)
+                binned_value = int((value / 127.0) * (self.num_cc_bins - 1))
+                #print(f"CC {control.number} value {value} binned to {binned_value} (using {self.num_cc_bins} bins)")
                 events.append(CCTypeEvent(number=control.number, time=control.time))
                 events.append(CCValueEvent(value=binned_value, time=control.time))
-            else:
-                print(f"Skipping CC {control.number} (not in allowed set)")
+            #else:
+                #print(f"Skipping CC {control.number} (not in allowed set)")
 
-        print("\nCC Type Usage Summary:")
-        for cc_type, count in sorted(cc_types_seen.items()):
-            print(f"CC {cc_type}: {count} times")
-            values = cc_values_seen[cc_type]
-            print(f"  Value range: {min(values)}-{max(values)}, avg: {sum(values)/len(values):.1f}")
+        #print("\nCC Type Usage Summary:")
+        #for cc_type, count in sorted(cc_types_seen.items()):
+        #    print(f"CC {cc_type}: {count} times")
+        #    values = cc_values_seen[cc_type]
+        #    print(f"  Value range: {min(values)}-{max(values)}, avg: {sum(values)/len(values):.1f}")
 
-        print(f"\nGenerated {len(events)} CC events (type+value pairs)")
-        return events 
+        #print(f"\nGenerated {len(events)} CC events (type+value pairs)")
+        return events
 
     def _create_track_events(
         self,
@@ -1602,7 +1655,7 @@ class StructuredREMI(REMI):
         attribute_controls_indexes: Optional[Dict[int, Union[List[int], bool]]] = None,
     ) -> List[Event]:
         """Create track events including our custom events.
-        
+
         Args:
             track: The track to create events for
             ticks_per_beat: Array of ticks per beat
@@ -1610,13 +1663,12 @@ class StructuredREMI(REMI):
             ticks_bars: Array of bar tick positions
             ticks_beats: Array of beat tick positions
             attribute_controls_indexes: Dictionary mapping track indices to control change indexes
-            
+
         Returns:
             List of Event objects for this track
         """
         track_events = []
-        
-        # First try to use parent's _create_track_events if available
+
         if hasattr(super(), '_create_track_events'):
             try:
                 parent_events = super()._create_track_events(
@@ -1631,97 +1683,106 @@ class StructuredREMI(REMI):
                 track_events.extend(parent_events)
             except Exception as e:
                 print(f"Warning: Parent _create_track_events failed: {e}")
-                # Fall back to individual event creation
                 pass
-        
-        # If parent method failed or doesn't exist, create events individually
+
         if not track_events:
-            # Program events
             if hasattr(super(), '_program_events'):
                 program_events = super()._program_events([track])
                 track_events.extend(program_events)
-            
-            # Note events
+
             if hasattr(super(), '_note_events'):
                 note_events = super()._note_events(track.notes)
                 track_events.extend(note_events)
-            
-            # Pedal events
+
             if self.config.use_sustain_pedals and hasattr(super(), '_pedal_events'):
                 pedal_events = super()._pedal_events(track.pedals)
                 track_events.extend(pedal_events)
-            
-            # Pitch bend events
+
             if self.config.use_pitch_bends and hasattr(super(), '_pitch_bend_events'):
                 pitch_bend_events = super()._pitch_bend_events(track.pitch_bends)
                 track_events.extend(pitch_bend_events)
-        
-        # Add our custom CC events
+
         if self.use_filtered_ccs and track.controls:
-            print(f"\nProcessing {len(track.controls)} CC events")
-            print(f"Filter mode: {self.cc_filter_mode}")
+            #print(f"\nProcessing {len(track.controls)} CC events")
+            #print(f"Filter mode: {self.cc_filter_mode}")
             cc_events = self._create_control_change_events_filtered(track.controls)
-            print(f"Generated {len(cc_events)} CC events")
+            #print(f"Generated {len(cc_events)} CC events")
             track_events.extend(cc_events)
-            
-        return track_events 
+
+        return track_events
 
     def _create_global_events(self, score: Score) -> List[Event]:
         """Create global events including our custom chord events."""
-        print("\n=== Starting _create_global_events in StructuredREMI ===")
-        
-        # Get base global events from parent class
-        global_events = super()._create_global_events(score)
-        print(f"Base global events: {len(global_events)}")
+        #print("\n=== Starting _create_global_events in StructuredREMI ===")
 
-        # Add our custom chord events
+        global_events = super()._create_global_events(score)
+        #print(f"Base global events: {len(global_events)}")
+
         if self.use_global_chords:
-            print("\nAnalyzing global chords...")
-            print(f"Chord analyzer: {self.chord_analyzer}")
-            print(f"Score time division: {score.ticks_per_quarter}")
-            print(f"Score tracks: {len(score.tracks)}")
-            
+            #print("\nAnalyzing global chords...")
+            #print(f"Chord analyzer: {self.chord_analyzer}")
+            #print(f"Score time division: {score.ticks_per_quarter}")
+            #print(f"Score tracks: {len(score.tracks)}")
+
             chord_events_data = self.chord_analyzer(score)
-            print(f"Found {len(chord_events_data)} chord events")
-            
+            #print(f"Found {len(chord_events_data)} chord events")
+
             # Log chord distribution
-            chord_qualities = {}
-            chord_roots = {}
+            #chord_qualities = {}
+            #chord_roots = {}
+            #for chord_data in chord_events_data:
+            #    quality = chord_data.get('quality', 'other')
+            #    root_pc = chord_data.get('root_pc')
+            #    chord_qualities[quality] = chord_qualities.get(quality, 0) + 1
+            #    if root_pc is not None:
+            #        chord_roots[root_pc] = chord_roots.get(root_pc, 0) + 1
+
+            #print(f"Chord quality distribution: {chord_qualities}")
+            #print(f"Chord root distribution: {chord_roots}")
+
+            filtered_chord_count = 0
+            time_zero_skipped = 0
+
             for chord_data in chord_events_data:
+                #print("DEBUG: CHECKPOINT 1 - Inside loop")
+                #sys.stdout.flush()
+                time = chord_data.get('time')
+                #print("DEBUG: CHECKPOINT 2 - Got time value")
+                #sys.stdout.flush()
+
+                if time == 0:
+                    #print(f"DEBUG: Skipping time 0 chord: {chord_data}")
+                    #sys.stdout.flush()
+                    time_zero_skipped += 1
+                    continue
+
+                #print(f"\nProcessing chord: {chord_data}")
                 quality = chord_data.get('quality', 'other')
-                root_pc = chord_data.get('root_pc')
-                chord_qualities[quality] = chord_qualities.get(quality, 0) + 1
-                if root_pc is not None:
-                    chord_roots[root_pc] = chord_roots.get(root_pc, 0) + 1
-            
-            print(f"Chord quality distribution: {chord_qualities}")
-            print(f"Chord root distribution: {chord_roots}")
-            
-            for chord_data in chord_events_data:
-                print(f"\nProcessing chord: {chord_data}")
-                quality = chord_data.get('quality', 'other')
-                if quality not in self.valid_chord_qualities: 
-                    print(f"Remapping quality {quality} to 'other' (valid qualities: {sorted(list(self.valid_chord_qualities))})")
+                if quality not in self.valid_chord_qualities:
+                    #print(f"Remapping quality {quality} to 'other' (valid qualities: {sorted(list(self.valid_chord_qualities))})")
                     quality = 'other'
                 root_pc = chord_data.get('root_pc')
-                time = chord_data.get('time')
                 if root_pc is not None and time is not None:
-                    print(f"Adding chord event at time {time}: root={root_pc}, quality={quality}")
+                    #print(f"Adding chord event at time {time}: root={root_pc}, quality={quality}")
                     root_event = GlobalChordRootEvent(root_pc=root_pc, time=time)
                     qual_event = GlobalChordQualEvent(quality=quality, time=time)
-                    print(f"Created events: {root_event}, {qual_event}")
+                    #print(f"Created events: {root_event}, {qual_event}")
                     global_events.extend([root_event, qual_event])
-                else:
-                    print(f"Skipping chord event due to missing root_pc or time: {chord_data}")
+                    filtered_chord_count += 1
+                #else:
+                    #print(f"Skipping chord event due to missing root_pc or time: {chord_data}")
 
-        print(f"\nTotal global events: {len(global_events)}")
-        return global_events 
+            print(f"\nSkipped {time_zero_skipped} chord events occurring exactly at time 0.")
+            #print(f"Added {filtered_chord_count} chord events (Root+Qual pairs) to global_events.")
+
+        #print(f"\nTotal global events: {len(global_events)}")
+        return global_events
 
     def _sort_events(self, events: List[Event]) -> None:
         """Sort events by time, then by priority, then by type.
-        
+
         This method is called by the parent class's _score_to_tokens method.
-        
+
         Args:
             events: List of events to sort
         """
@@ -1745,6 +1806,6 @@ class StructuredREMI(REMI):
             "PitchBend": 15,
             "Rest": 16,
         }
-        
+
         # Sort events by time, then by priority, then by type
         events.sort(key=lambda e: (e.time, event_priority.get(e.type_, 100), e.type_))

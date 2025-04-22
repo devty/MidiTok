@@ -269,15 +269,19 @@ def standardize_chord_quality(chord: music21.chord.Chord) -> str:
 
         # --- Interval/Name-Based Mapping (if direct quality failed or insufficient) ---
         # Check suspended explicitly
-        if chord.isSuspendedTriad():
-            # Check intervals to differentiate sus2/sus4 (relative to root)
-            root_pc = chord.root().pitchClass
-            relative_intervals = sorted([(note.pitch.pitchClass - root_pc + 12) % 12 for note in chord.notes])
-            if 5 in relative_intervals and 7 in relative_intervals: return "sus4" # Check for P4, P5
-            if 2 in relative_intervals and 7 in relative_intervals: return "sus2" # Check for M2, P5
+        try:
+            if chord.isSuspendedTriad():
+                # Check intervals to differentiate sus2/sus4 (relative to root)
+                root_pc = chord.root().pitchClass
+                relative_intervals = sorted([(note.pitch.pitchClass - root_pc + 12) % 12 for note in chord.notes])
+                if 5 in relative_intervals and 7 in relative_intervals: return "sus4" # Check for P4, P5
+                if 2 in relative_intervals and 7 in relative_intervals: return "sus2" # Check for M2, P5
+        except AttributeError:
+             logger.debug(f"AttributeError checking isSuspendedTriad for {chord}. Skipping suspended check.")
+             pass # Continue if the attribute doesn't exist
 
         # Check power chord (root and fifth only)
-        if chord.isPowerChord(): return "power"
+        #if chord.isPowerChord(): return "power"
 
         # Fallback to common names for more complex chords (11ths, 13ths)
         try:
@@ -373,7 +377,11 @@ def get_neo_riemannian_transformation(chord1: music21.chord.Chord, chord2: music
     # Other transformations (S, N, H) are more complex and not implemented here.
     return None
 
-def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
+def extract_chord_events(
+    score: symusic.Score,
+    analyze_roman_numerals: bool = True,  # New parameter
+    analyze_neo_riemannian: bool = True   # New parameter
+) -> List[Dict[str, Any]]:
     """
     Extract chord events (root_pc, quality, time, roman_numeral, neo_riemannian)
     from a symusic.Score. Requires music21 for analysis.
@@ -381,6 +389,8 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
 
     Args:
         score: The symusic.Score object to analyze.
+        analyze_roman_numerals: Whether to analyze Roman numerals.
+        analyze_neo_riemannian: Whether to analyze Neo-Riemannian transformations.
 
     Returns:
         A list of dictionaries, each representing a chord event:
@@ -388,10 +398,16 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
          'roman_numeral': Optional[str], 'neo_riemannian': Optional[str]}
         Returns empty list if music21 is unavailable or analysis fails.
     """
-    print("\n=== Starting extract_chord_events (music21 required) ===")
-    print(f"Score time division: {score.ticks_per_quarter}")
-    print(f"Score tracks: {len(score.tracks)}")
-    print(f"Music21 available: {MUSIC21_AVAILABLE}")
+    # <<< Remove Debug Prints >>>
+    #print(f"\n=== ENTERING extract_chord_events ===")
+    #print(f"  analyze_roman_numerals = {analyze_roman_numerals}")
+    #print(f"  analyze_neo_riemannian = {analyze_neo_riemannian}")
+    # <<< End Remove >>>
+
+    #print("\n=== Starting extract_chord_events (music21 required) ===")
+    #print(f"Score time division: {score.ticks_per_quarter}")
+    #print(f"Score tracks: {len(score.tracks)}")
+    #print(f"Music21 available: {MUSIC21_AVAILABLE}")
 
     if not MUSIC21_AVAILABLE:
         logger.error("music21 is required for chord analysis but not found. Skipping chord extraction.")
@@ -402,51 +418,47 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
     temp_midi_file = None
 
     try:
-        print("\nRunning music21 analysis...")
+        #print("\nRunning music21 analysis...")
         with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp_midi:
             temp_midi_file = tmp_midi.name
-            print(f"Created temp file: {temp_midi_file}")
-            score.dump_midi(temp_midi_file) # Use symusic's dump method
+            #print(f"Created temp file: {temp_midi_file}")
+            score.dump_midi(temp_midi_file)
 
-        # Parse the temporary file with music21
-        print("Parsing with music21...")
+        #print("Parsing with music21...")
         m21_score = music21.converter.parse(temp_midi_file)
-        # Use chordify to find chords
-        print("Chordifying score...")
-        # Consider chordifying options: addPartIdAsGroup=True ?
+        #print("Chordifying score...")
         chordified_score = m21_score.chordify()
 
-        # --- Key Analysis ---
-        print("\nAnalyzing key...")
         key = None
-        try:
-            key = m21_score.analyze('key')
-            print(f"Key analysis result: {key}")
-        except Exception as key_err:
-            print(f"Key analysis failed: {key_err}")
-            key = None # Ensure key is None if analysis fails
+        if analyze_roman_numerals:
+            #print("\nAnalyzing key (for Roman Numerals)...")
+            try:
+                key = m21_score.analyze('key')
+                #print(f"Key analysis result: {key}")
+            except Exception as key_err:
+                print(f"Key analysis failed: {key_err}")
+                key = None
+        #else:
+             #print("\nSkipping key analysis (Roman Numerals disabled).")
 
-        print("\nExtracting chords, Roman numerals, and Neo-Riemannian transformations...")
+        #print("\nExtracting chords...")
         chord_count = 0
         rn_count = 0
         nr_count = 0
         quality_counts = defaultdict(int)
         root_counts = defaultdict(int)
-        previous_chord = None # Store the previous chord for NR analysis
+        previous_chord = None
 
-        # Recurse once and store chords to avoid repeated recursion
         all_chord_elements = list(chordified_score.recurse().getElementsByClass('Chord'))
-        print(f"Found {len(all_chord_elements)} potential chord elements.")
+        #print(f"Found {len(all_chord_elements)} potential chord elements.")
 
         for element in all_chord_elements:
-            if not element.isRest: # Ignore rests that might be chordified
+            if not element.isRest:
                 current_chord_data = {}
                 try:
-                    # Standardize quality FIRST
                     quality = standardize_chord_quality(element)
                     quality_counts[quality] += 1
 
-                    # Ensure quality is one of the expected ones (redundant if standardize handles it, but safe)
                     if quality not in TOKENIZER_EXPECTED_QUALITIES:
                         logger.warning(f"Standardized quality '{quality}' not in expected set for {element}. Using 'other'.")
                         quality = 'other'
@@ -454,12 +466,11 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
                     root = element.root()
                     if root is None:
                         logger.debug(f"Skipping chord element (no root): {element}")
-                        previous_chord = None # Reset previous if current is invalid
-                        continue # Skip if no root found
+                        previous_chord = None
+                        continue
 
-                    root_pc = root.pitchClass # 0-11
+                    root_pc = root.pitchClass
                     root_counts[root_pc] += 1
-                    # Convert music21 offset (quarter notes) to ticks
                     time_ticks = int(round(element.offset * ticks_per_quarter))
 
                     current_chord_data = {
@@ -470,13 +481,11 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
                         "neo_riemannian": None
                     }
 
-                    # --- Roman Numeral Analysis ---
-                    if key:
+                    if analyze_roman_numerals and key:
                         try:
-                            # Allow minor chords identified as major (e.g., V in minor)
+                            #print(f"  Attempting Roman Numeral analysis for: {element} in key {key}")
                             rn_obj = music21.roman.romanNumeralFromChord(element, key, ignoreDiminishedMinorQuality=True)
-                            rn_figure = rn_obj.figure # Get the figure (e.g., 'V7', 'viio')
-                            # Basic cleaning: remove spaces often added by music21
+                            rn_figure = rn_obj.figure
                             rn_figure_cleaned = rn_figure.replace(' ', '')
                             current_chord_data['roman_numeral'] = rn_figure_cleaned
                             rn_count += 1
@@ -485,21 +494,18 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
                         except Exception as rn_err_general:
                              logger.warning(f"Unexpected error during Roman Numeral analysis for {element}: {rn_err_general}")
 
-                    # --- Neo-Riemannian Analysis ---
-                    if previous_chord: # Check only if there was a valid previous chord
+                    if analyze_neo_riemannian and previous_chord:
                          try:
-                             nr_label = get_neo_riemannian_transformation(previous_chord, element)
-                             if nr_label:
-                                 current_chord_data['neo_riemannian'] = nr_label
-                                 nr_count += 1
+                            #print(f"  Attempting Neo-Riemannian analysis between: {previous_chord} and {element}")
+                            nr_label = get_neo_riemannian_transformation(previous_chord, element)
+                            if nr_label:
+                                current_chord_data['neo_riemannian'] = nr_label
+                                nr_count += 1
                          except Exception as nr_err:
                               logger.warning(f"Error during Neo-Riemannian analysis between {previous_chord} and {element}: {nr_err}")
 
-                    # --- Duplicate Check & Append ---
-                    # Avoid duplicate full entries (including RN/NR) at the exact same time
                     is_duplicate = False
                     if chord_events and chord_events[-1]['time'] == time_ticks:
-                         # Compare all relevant fields now
                          if (chord_events[-1]['root_pc'] == root_pc and
                              chord_events[-1]['quality'] == quality and
                              chord_events[-1]['roman_numeral'] == current_chord_data['roman_numeral'] and
@@ -509,41 +515,35 @@ def extract_chord_events(score: symusic.Score) -> List[Dict[str, Any]]:
                     if not is_duplicate:
                         chord_events.append(current_chord_data)
                         chord_count += 1
-                        if chord_count % 50 == 0: # Log less frequently
-                            print(f"Processed {chord_count} chords ({rn_count} RNs, {nr_count} NRs)...")
-                        previous_chord = element # Store current chord for next iteration's NR check
+                        #if chord_count % 50 == 0: # Log less frequently
+                        #    print(f"Processed {chord_count} chords ({rn_count} RNs, {nr_count} NRs)...")
+                        previous_chord = element
                     else:
-                         # If duplicate, still update previous_chord to the latest one at this time
                          previous_chord = element
 
                 except Exception as inner_e:
                     print(f"Failed extracting/processing music21 chord element {element}: {inner_e}")
-                    traceback.print_exc(limit=1) # Print limited traceback for inner error
-                    previous_chord = None # Reset previous if current is invalid
-                    continue # Skip this chord
+                    traceback.print_exc(limit=1)
+                    previous_chord = None
+                    continue
             else:
-                 # If element is a rest, reset previous_chord context
                  previous_chord = None
 
-        print("\nChord analysis summary:")
-        print(f"Total unique chord events generated: {chord_count}")
-        print(f"Roman numerals identified: {rn_count}")
-        print(f"Neo-Riemannian transformations identified: {nr_count}")
-        print(f"Quality distribution: {dict(quality_counts)}")
-        print(f"Root distribution: {dict(root_counts)}")
+        #print("\nChord analysis summary:")
+        #print(f"Total unique chord events generated: {chord_count}")
+        #print(f"Roman numerals identified: {rn_count}")
+        #print(f"Neo-Riemannian transformations identified: {nr_count}")
+        #print(f"Quality distribution: {dict(quality_counts)}")
+        #print(f"Root distribution: {dict(root_counts)}")
 
-        # Sort by time as chordify might not preserve perfect order (already sorted?)
         chord_events.sort(key=lambda x: x['time'])
-        # Clean up temp file
         if temp_midi_file: os.unlink(temp_midi_file)
-        print("\n=== Finished extract_chord_events ===")
+        #print("\n=== Finished extract_chord_events ===")
         return chord_events
 
     except Exception as e:
         print(f"Music21 chord analysis failed: {e}")
         print("Stack trace:")
         traceback.print_exc()
-        # Clean up temp file in case of error
         if temp_midi_file and os.path.exists(temp_midi_file): os.unlink(temp_midi_file)
-        # Return empty list on failure
         return []
