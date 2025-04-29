@@ -37,14 +37,16 @@ if MUSIC21_AVAILABLE:
 # --- Instrument Mapping Constants (from instrument_mappings.py) ---
 
 INSTRUMENT_KEYWORDS = {
-    "strings": ["violin", "viola", "cello", "bass", "strings", "str", "vln", "vla", "vc", "cb"],
-    "brass": ["trumpet", "trombone", "horn", "tuba", "brass", "tpt", "tbn", "hn"],
-    "woodwinds": ["flute", "oboe", "clarinet", "bassoon", "woodwind", "fl", "ob", "cl", "bsn"],
-    "percussion": ["percussion", "timpani", "drums", "cymbals", "perc", "timp"],
-    "piano": ["piano", "pno", "grand", "upright"],
-    "choir": ["choir", "chorus", "vocals", "soprano", "alto", "tenor", "bass"],
-    "synth": ["synth", "pad", "lead", "electronic"],
-    "guitar": ["guitar", "gtr", "acoustic", "electric"]
+    "strings": ["violin", "violins", "viola", "violas", "cello", "cellos", "celli", "violoncello", "violoncellos", "double bass", "double basses", "contrabass", "contrabasses", "bass", "basses", "strings", "str", "vln", "vlns", "vl", "vn", "vla", "vlas", "va", "vc", "vcs", "cb", "cbs", "db", "dbs"],
+    "brass": ["trumpet", "trumpets", "cornet", "cornets", "trombone", "trombones", "french horn", "french horns", "horn", "horns", "tuba", "tubas", "euphonium", "euphoniums", "brass", "tpt", "tpts", "trp", "trps", "cnt", "tbn", "tbns", "trb", "hn", "hns", "fhn", "tb", "tbs", "euph"],
+    "woodwinds": ["flute", "flutes", "piccolo", "piccolos", "oboe", "oboes", "english horn", "english horns", "cor anglais", "clarinet", "clarinets", "bass clarinet", "bass clarinets", "bassoon", "bassoons", "contrabassoon", "contrabassoons", "saxophone", "saxophones", "woodwind", "woodwinds", "ww", "fl", "fls", "picc", "ob", "obs", "eh", "cl", "cls", "bcl", "bsn", "bsns", "cbsn", "sax", "saxs", "saxo"],
+    "percussion": ["percussion", "timpani", "tympani", "snare drum", "snare", "snares", "bass drum", "kick", "cymbals", "crash", "ride", "hihat", "hi-hat", "triangle", "triangles", "xylophone", "marimba", "vibraphone", "glockenspiel", "chimes", "tubular bells", "tambourine", "gong", "tam-tam", "drums", "drumset", "drum kit", "perc", "timp", "tymp", "sd", "bd", "kick", "cym", "tri", "xyl", "mar", "vib", "glk"],
+    "piano": ["piano", "pianos", "keyboard", "keyboards", "celesta", "celestas", "harpsichord", "harpsichords", "clavichord", "pno", "pn", "kbd", "keys", "cel", "hpd", "clav", "grand", "upright"],
+    "harp": ["harp", "harps", "hp", "hrp"],
+    "organ": ["organ", "organs", "pipe organ", "electric organ", "hammond", "org"],
+    "choir": ["choir", "chorus", "vocals", "voice", "soprano", "sopranos", "alto", "altos", "tenor", "tenors", "baritone", "baritones", "bass", "basses", "satb", "sop", "alt", "ten", "bar", "bas", "vox"],
+    "synth": ["synth", "synths", "synthesizer", "synthesizers", "pad", "pads", "lead", "leads", "bass synth", "synth bass", "keys", "electronic"],
+    "guitar": ["guitar", "guitars", "gtr", "gtrs", "acoustic guitar", "electric guitar", "bass guitar", "ac gtr", "el gtr", "eg", "bs gtr", "acoustic", "electric", "elec", "acou", "bass"]
 }
 
 PROGRAM_RANGES = {
@@ -76,8 +78,8 @@ INSTRUMENT_CC_MAPPINGS = {
     "organ": {"essential": [11], "extended": [1, 7, 10, 11, 66, 91, 93]}, # Less sustain, maybe sostenuto, Leslie speed? (often not CC 1)
     "guitar": {"essential": [11, 64], "extended": [1, 7, 10, 11, 64, 65, 91, 93]}, # Added portamento, etc.
     "bass": {"essential": [11], "extended": [1, 7, 10, 11, 65, 91, 93]},
-    "strings": {"essential": [1, 11, 64], "extended": [1, 7, 10, 11, 64, 65, 68, 91, 93]}, # Legato, etc.
-    "ensemble": {"essential": [1, 11, 64], "extended": [1, 7, 10, 11, 64, 91, 93]}, # Generic ensemble
+    "strings": {"essential": [1, 11], "extended": [1, 7, 10, 11, 64, 65, 68, 91, 93]}, # Legato, etc.
+    "ensemble": {"essential": [1, 11], "extended": [1, 7, 10, 11, 64, 91, 93]}, # Generic ensemble
     "brass": {"essential": [1, 11], "extended": [1, 7, 10, 11, 65, 68, 91, 93]}, # Mutes often sys-ex, legato CC
     "reed": {"essential": [1, 11], "extended": [1, 7, 10, 11, 65, 91, 93]},
     "pipe": {"essential": [1, 11], "extended": [1, 7, 10, 11, 91, 93]}, # Flutes less common CCs
@@ -220,6 +222,62 @@ def map_track_name_to_family(track_name: Optional[str]) -> str:
 
     # Final fallback
     return "other"
+
+# <<< Add new function >>>
+def get_program_from_instrument_family(family_name: str) -> Tuple[int, bool]:
+    """
+    Maps an instrument family name (from TARGET_INSTRUMENT_FAMILIES) back to
+    a representative MIDI program number and an is_drum flag.
+
+    Args:
+        family_name: The target instrument family name (e.g., "strings", "drums").
+
+    Returns:
+        A tuple (program_number, is_drum).
+        Returns (0, False) for unknown or "other" families.
+    """
+    family_lower = family_name.lower().replace('_', ' ') # Normalize input
+
+    # Handle special cases first
+    if family_lower == "drums":
+        return 0, True # Use program 0 for drums track, but set is_drum flag
+    if family_lower in ["other", "unknown"]:
+        return 0, False # Default to Acoustic Grand Piano
+
+    # Match against PROGRAM_RANGES keys (which are GM family names)
+    # Need to map our target families back to these GM families
+    gm_family_map = {
+        "piano": "piano",
+        "guitar": "guitar",
+        "bass": "bass",
+        "strings": "strings",
+        "brass": "brass",
+        "reed": "reed",
+        "pipe": "pipe",
+        "synth": "synth lead", # Map general synth to synth lead
+        "drums": "drum kit", # Handled above, but for completeness
+        "percussion": "chromatic percussion", # Map our percussion to GM chromatic
+        "choir": "ensemble", # Map choir to GM ensemble/synth voice
+        "organ": "organ",
+        "ensemble": "ensemble",
+        "ethnic": "ethnic",
+        "sound effects": "sound effects"
+    }
+
+    target_gm_family = gm_family_map.get(family_lower)
+
+    if target_gm_family and target_gm_family in PROGRAM_RANGES:
+        # Return the starting program number of the range
+        start_program, _ = PROGRAM_RANGES[target_gm_family]
+        # Ensure drums are handled correctly (should be caught by special case above)
+        if target_gm_family == "drum kit":
+            return 0, True
+        # Ensure we don't return -1 for program number
+        return max(0, start_program), False
+
+    # Fallback if no match found
+    logger.warning(f"Could not map family '{family_name}' to a program number. Defaulting to Piano (0). Check TARGET_INSTRUMENT_FAMILIES and PROGRAM_RANGES.")
+    return 0, False
 
 # --- Chord Analysis Constants and Functions (from music_theory.py) ---
 

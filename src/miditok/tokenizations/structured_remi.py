@@ -39,7 +39,7 @@ from miditok.constants import (
 )
 from miditok.tokenizations.remi import REMI
 from miditok.utils import compute_ticks_per_bar, compute_ticks_per_beat
-from ..utils.structured_utils import (
+from miditok.utils.structured_utils import (
     get_instrument_type_from_program,
     get_relevant_ccs_for_instrument,
     normalize_track_name,
@@ -176,7 +176,7 @@ class StructuredREMI(REMI):
         use_filtered_ccs: bool = True,
         cc_filter_mode: str = 'instrument_aware',
         cc_list: Optional[List[int]] = None,
-        cc_bins: int = 32,
+        cc_bins: int = 128,
         chord_analysis_func: Optional[callable] = None,
         # <<< New Flags >>>
         use_roman_numerals: bool = True, # Default to False
@@ -216,14 +216,14 @@ class StructuredREMI(REMI):
         # Provide a default config if none is given and no params file is specified
         if tokenizer_config is None and params is None:
             tokenizer_config = TokenizerConfig(
-                use_chords=False, # Base miditok chords off if using our global ones
+                use_chords=True, # Base miditok chords off if using our global ones
                 use_rests=True,
                 use_tempos=True,
                 use_time_signatures=True,
                 use_programs=True,
                 use_control_changes=False, # Ensure miditok CCs are OFF
                 one_token_stream_for_programs=True, # Usually desired for structured approach
-                num_velocities=32,
+                num_velocities=64,
                 beat_res={(0, 4): 8, (4, 12): 4},
                 additional_params={
                     'tempo_range': (40, 250), 'num_tempos': 64,
@@ -232,7 +232,7 @@ class StructuredREMI(REMI):
                     'use_bar_end_tokens': False,
                     'add_trailing_bars': False,
                     # Add flags to config so they are saved/loaded automatically
-                    'use_track_names': _use_track_names,
+                    'use_track_names': True,
                     'use_global_chords': _use_global_chords,
                     'use_filtered_ccs': _use_filtered_ccs,
                     'cc_filter_mode': _cc_filter_mode,
@@ -951,7 +951,7 @@ class StructuredREMI(REMI):
                             if 0 <= root_idx < 12:
                                 root_name = PITCH_CLASS_NAMES[root_idx]
                                 lyric_text = f"{root_name}:{tok_val}"
-                                lyric = symusic.Lyric(time=current_tick, text=lyric_text)
+                                lyric = symusic.TextMeta(time=current_tick, text=lyric_text)
                                 chord_lyrics.append(lyric)
                             else:
                                 # Log warning for invalid root index
@@ -1037,7 +1037,7 @@ class StructuredREMI(REMI):
             vocab.append("Bar_End")
 
         # NoteOn/NoteOff/Velocity/Duration (handled by parent method)
-        self._add_note_tokens_to_vocab_list(vocab)
+        super()._add_note_tokens_to_vocab_list(vocab)
 
         # Position
         max_num_beats = max(ts[0] for ts in self.time_signatures)
@@ -1045,7 +1045,7 @@ class StructuredREMI(REMI):
         vocab += [f"Position_{i}" for i in range(num_positions)]
 
         # Add additional tokens (Tempo, Chord, Rest, Program) handled by parent
-        self._add_additional_tokens_to_vocab_list(vocab)
+        super()._add_additional_tokens_to_vocab_list(vocab)
 
         # --- Add Custom Tokens --- #
         # Read flags directly from config, as self attributes might not be set yet
@@ -1072,7 +1072,7 @@ class StructuredREMI(REMI):
 
         # Filtered CCs
         if _use_filtered_ccs:
-            num_cc_bins = config_params.get('num_cc_bins', 32) # Get bins from config
+            num_cc_bins = config_params.get('num_cc_bins', 128) # Get bins from config
             # CC Types (0-127)
             vocab += [f"CCType_{i}" for i in range(128)]
             # CC Values (Binned)
@@ -1333,7 +1333,7 @@ class StructuredREMI(REMI):
                      dic[note_key].add("Pedal")
                      dic[note_key].add("PedalOff")
 
-        # Add links with other features
+        # Tokens that can follow a rest
         if self.config.use_chords:
             dic["Pedal"].add("Chord")
             if not self.config.sustain_pedal_duration:
@@ -1418,11 +1418,7 @@ class StructuredREMI(REMI):
         #sys.stdout.flush()
         # <<< END REMOVED DEBUG >>>
 
-        #print("\n=== Starting _score_to_events in StructuredREMI === (THIS VERSION)")
-        #print(f"Score tracks: {len(score.tracks)}")
-        #print(f"Score time division: {score.ticks_per_quarter}")
-        #print(f"Score end time: {score.end()}")
-        #print(f"Tokenizer config: {self.config}")
+        #print("\n=== Starting _score_to_events in StructuredREMI ===")
 
         # Sort tracks
         score.tracks.sort(key=lambda x: (x.program, x.is_drum))
@@ -1484,7 +1480,6 @@ class StructuredREMI(REMI):
                     filtered_chord_count += 1
                 #else:
                     #print(f"Skipping chord event due to missing root_pc or time: {chord_data}")
-            # Log skipped count (optional, keep if useful)
             print(f"Skipped {time_zero_skipped} chord events occurring exactly at time 0.")
             #print(f"Added {filtered_chord_count} chord events (Root+Qual pairs) to all_events.")
 
@@ -1534,11 +1529,15 @@ class StructuredREMI(REMI):
                 cc_events = self._create_control_change_events_filtered(track.controls)
                 #print(f"Generated {len(cc_events)} CC events")
                 track_events += cc_events
-
+            else:
+                print("--- DEBUG (StructuredREMI): Skipping filtered CCs ---")
+        
+            # Events should be sorted by time before being processed by _add_time_events.
+            # MusicTokenizer._score_to_tokens handles sorting after collecting all events.
+            # track_events.sort(key=lambda x: x.time) # Sorting here is redundant as _score_to_tokens sorts later
+        
+            print(f"--- DEBUG (StructuredREMI): Exiting _create_track_events for track '{track.name}', returning {len(track_events)} total events ---")
             all_events += track_events
-            #print(f"--- Finished Track {track_idx}: Added {len(track_events)} events ---")
-            total_track_event_count += len(track_events)
-            #sys.stdout.flush()
             #print(f"Total events for track {track_idx}: {len(track_events)}")
 
         #print(f"\n=== Finished Processing All Tracks: Added {total_track_event_count} track events ===")
@@ -1648,67 +1647,61 @@ class StructuredREMI(REMI):
     def _create_track_events(
         self,
         track: Track,
-        ticks_per_beat: Optional[np.ndarray] = None,
-        ticks_per_quarter: Optional[int] = None,
-        ticks_bars: Optional[np.ndarray] = None,
-        ticks_beats: Optional[np.ndarray] = None,
-        attribute_controls_indexes: Optional[Dict[int, Union[List[int], bool]]] = None,
-    ) -> List[Event]:
-        """Create track events including our custom events.
-
-        Args:
-            track: The track to create events for
-            ticks_per_beat: Array of ticks per beat
-            ticks_per_quarter: Number of ticks per quarter
-            ticks_bars: Array of bar tick positions
-            ticks_beats: Array of beat tick positions
-            attribute_controls_indexes: Dictionary mapping track indices to control change indexes
-
-        Returns:
-            List of Event objects for this track
-        """
+        ticks_per_beat: np.ndarray,
+        ticks_per_quarter: int,
+        ticks_bars: Sequence[int] | None = None,
+        ticks_beats: Sequence[int] | None = None,
+        attribute_controls_indexes: Mapping[int, Sequence[int] | bool] | None = None,
+    ) -> list[Event]:
+        """Create track events by manually iterating through notes, pedals, bends, and adding filtered CCs."""
+        print(f"\n--- DEBUG (StructuredREMI): Entering _create_track_events for track '{track.name}' (Notes: {len(track.notes)}, Pedals: {len(track.pedals)}, Bends: {len(track.pitch_bends)}, CCs: {len(track.controls)}) --- ")
+        
         track_events = []
-
-        if hasattr(super(), '_create_track_events'):
-            try:
-                parent_events = super()._create_track_events(
-                    track=track,
-                    ticks_per_beat=ticks_per_beat,
-                    time_division=ticks_per_quarter,
-                    ticks_bars=ticks_bars,
-                    ticks_beats=ticks_beats,
-                    add_track_attribute_controls=False,
-                    bar_idx_attribute_controls=None
+        program = track.program if not track.is_drum else -1
+        # Note events (Generate only Pitch events)
+        print(f"--- DEBUG (StructuredREMI): Generating Note events ({len(track.notes)} notes) ---")
+        for note in track.notes:
+            # We just need the basic Pitch event with time and duration (in desc).
+            # Subsequent steps (_add_time_events) will handle Velocity/Duration tokens if needed by the config.
+            track_events.append(
+                Event(type_="Pitch", value=note.pitch, time=note.time, desc=note.duration)
+            )
+            # print(f"    Generated Pitch event at time {note.time}: {note.pitch} (dur: {note.duration})") # Optional debug print
+        
+        # Pedal events
+        if self.config.use_sustain_pedals:
+            print(f"--- DEBUG (StructuredREMI): Generating Pedal events ({len(track.pedals)} pedals) ---")
+            for pedal in track.pedals:
+                 # REMI uses Pedal tokens. Store duration in desc if sustain_pedal_duration is true
+                 pedal_desc = pedal.duration if self.config.sustain_pedal_duration else 0
+                 track_events.append(
+                    # For REMI, Pedal value might indicate ON state, not duration. Need to confirm.
+                    # Let's assume None for now and duration in desc if configured.
+                    Event(type_="Pedal", value=None, time=pedal.time, desc=pedal_desc)
+                 )
+        
+        # Pitch bend events
+        if self.config.use_pitch_bends:
+            print(f"--- DEBUG (StructuredREMI): Generating Pitch Bend events ({len(track.pitch_bends)} bends) ---")
+            for bend in track.pitch_bends:
+                track_events.append(
+                    Event(type_="PitchBend", value=bend.value, time=bend.time)
                 )
-                track_events.extend(parent_events)
-            except Exception as e:
-                print(f"Warning: Parent _create_track_events failed: {e}")
-                pass
-
-        if not track_events:
-            if hasattr(super(), '_program_events'):
-                program_events = super()._program_events([track])
-                track_events.extend(program_events)
-
-            if hasattr(super(), '_note_events'):
-                note_events = super()._note_events(track.notes)
-                track_events.extend(note_events)
-
-            if self.config.use_sustain_pedals and hasattr(super(), '_pedal_events'):
-                pedal_events = super()._pedal_events(track.pedals)
-                track_events.extend(pedal_events)
-
-            if self.config.use_pitch_bends and hasattr(super(), '_pitch_bend_events'):
-                pitch_bend_events = super()._pitch_bend_events(track.pitch_bends)
-                track_events.extend(pitch_bend_events)
-
+        
+        # --- Add filtered CC events --- 
         if self.use_filtered_ccs and track.controls:
-            #print(f"\nProcessing {len(track.controls)} CC events")
-            #print(f"Filter mode: {self.cc_filter_mode}")
+            print(f"--- DEBUG (StructuredREMI): Adding filtered CCs ({len(track.controls)} controls) ---")
             cc_events = self._create_control_change_events_filtered(track.controls)
-            #print(f"Generated {len(cc_events)} CC events")
+            print(f"--- DEBUG (StructuredREMI): Generated {len(cc_events)} filtered CC events ---")
             track_events.extend(cc_events)
-
+        else:
+            print("--- DEBUG (StructuredREMI): Skipping filtered CCs ---")
+        
+        # Events should be sorted by time before being processed by _add_time_events.
+        # MusicTokenizer._score_to_tokens handles sorting after collecting all events.
+        # track_events.sort(key=lambda x: x.time) # Sorting here is redundant as _score_to_tokens sorts later
+        
+        print(f"--- DEBUG (StructuredREMI): Exiting _create_track_events for track '{track.name}', returning {len(track_events)} total events ---")
         return track_events
 
     def _create_global_events(self, score: Score) -> List[Event]:
@@ -1730,16 +1723,6 @@ class StructuredREMI(REMI):
             # Log chord distribution
             #chord_qualities = {}
             #chord_roots = {}
-            #for chord_data in chord_events_data:
-            #    quality = chord_data.get('quality', 'other')
-            #    root_pc = chord_data.get('root_pc')
-            #    chord_qualities[quality] = chord_qualities.get(quality, 0) + 1
-            #    if root_pc is not None:
-            #        chord_roots[root_pc] = chord_roots.get(root_pc, 0) + 1
-
-            #print(f"Chord quality distribution: {chord_qualities}")
-            #print(f"Chord root distribution: {chord_roots}")
-
             filtered_chord_count = 0
             time_zero_skipped = 0
 
@@ -1747,8 +1730,11 @@ class StructuredREMI(REMI):
                 #print("DEBUG: CHECKPOINT 1 - Inside loop")
                 #sys.stdout.flush()
                 time = chord_data.get('time')
+
+                # <<< Remove Checkpoint prints >>>
                 #print("DEBUG: CHECKPOINT 2 - Got time value")
                 #sys.stdout.flush()
+                # <<< End Removed Prints >>>
 
                 if time == 0:
                     #print(f"DEBUG: Skipping time 0 chord: {chord_data}")
@@ -1771,7 +1757,6 @@ class StructuredREMI(REMI):
                     filtered_chord_count += 1
                 #else:
                     #print(f"Skipping chord event due to missing root_pc or time: {chord_data}")
-
             print(f"\nSkipped {time_zero_skipped} chord events occurring exactly at time 0.")
             #print(f"Added {filtered_chord_count} chord events (Root+Qual pairs) to global_events.")
 
