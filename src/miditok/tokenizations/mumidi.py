@@ -97,14 +97,14 @@ class MuMIDI(MusicTokenizer):
                  use_sustain_pedals=False,
                  use_pitch_bends=False,
                  use_velocities=True, # MuMIDI uses velocities
-                 use_note_duration_programs=[], # Default to using durations for all
+                 use_note_duration_programs=[0,1,2,3], # Default to using durations for all
                  one_token_stream_for_programs=True, # Core MuMIDI concept
                  program_changes=False,
                  # Default beat res, potentially adjust
                  beat_res={(0, 4): 8, (4, 12): 4},
                  num_velocities=128, # MuMIDI usually uses 128
                  additional_params={
-                     'max_bar_embedding': 60, # Default from original MuMIDI
+                     'max_bar_embedding': 256, # Default from original MuMIDI
                      # Add new flags to default config
                      'use_track_names': _use_track_names,
                      'use_filtered_ccs': _use_filtered_ccs,
@@ -218,7 +218,7 @@ class MuMIDI(MusicTokenizer):
 
         # Add max_bar_embedding if missing (MuMIDI default)
         if "max_bar_embedding" not in self.config.additional_params:
-            self.config.additional_params["max_bar_embedding"] = 60
+            self.config.additional_params["max_bar_embedding"] = 128
 
         # <<< Update vocab_types_idx >>>
         self.vocab_types_idx = {
@@ -482,10 +482,6 @@ class MuMIDI(MusicTokenizer):
              # Generate note and CC events for the track
              track_events = self._track_to_tokens(track, track_family=track_family) # Pass family for CC filtering
 
-             # Assign track_id (family or program) to desc field for sorting/grouping
-             for event in track_events:
-                  event.desc = track_id # Use family name or program number as needed
-
              all_track_events.extend(track_events)
 
 
@@ -575,23 +571,22 @@ class MuMIDI(MusicTokenizer):
                         # Parse the serialized string format
                         desc_parts = event.desc.split("|")
                         note_velocity_str = desc_parts[0]
-                        note_velocity = int(note_velocity_str) if note_velocity_str else None
+                        # Correctly handle 'None' string before int conversion
+                        note_velocity = int(note_velocity_str) if note_velocity_str and note_velocity_str != 'None' else None
                         note_duration_str = desc_parts[1] if desc_parts[1] else None
                         event_track_id = desc_parts[2]
                         # Convert track_id back to int if it's meant to be a program number
                         if not _using_track_names and isinstance(event_track_id, str) and event_track_id.lstrip('-').isdigit():
                             event_track_id = int(event_track_id)
+                    # Removed the else block that attempted tuple unpacking
                     else:
-                        # Fallback to legacy tuple unpacking for compatibility
-                        note_velocity, note_duration_str, event_track_id = event.desc
-                except (TypeError, ValueError, IndexError):
-                    self.logger.warning(f"Could not unpack desc for event {event}. Using defaults.")
+                        # If desc is not the expected string format, raise an error to be caught
+                        raise TypeError(f"event.desc has unexpected format: {type(event.desc)}, value: {event.desc}")
+
+                except (TypeError, ValueError, IndexError) as e:
+                    self.logger.warning(f"Could not unpack desc for event {event} (Error: {e}). Using defaults.")
                     # Fallback if desc is not as expected
                     event_track_id = "unknown" if _using_track_names else -1
-                    note_velocity = DEFAULT_VELOCITY if self.config.use_velocities else None
-                    # Find the shortest duration token string
-                    shortest_duration_val = self.durations[0] if self.durations else None
-                    note_duration_str = ".".join(map(str, shortest_duration_val)) if self.config.using_note_duration_tokens and shortest_duration_val else None
 
             elif event_type in ["CCType", "CCValue", "TrackName"] or (_using_track_names is False and event_type == "Program"):
                  # These events store track_id directly in desc
@@ -928,22 +923,30 @@ class MuMIDI(MusicTokenizer):
                     # Allow None velocity? For now, use default if token invalid.
 
                 # Extract Duration
-                duration = self.config.default_note_duration * ticks_per_beat # Default
+                # --- MODIFICATION: Ensure default duration is int ticks ---
+                default_duration_ticks = int(round(self.config.default_note_duration * ticks_per_beat)) # Calculate default in ticks and ensure int
+                duration = default_duration_ticks # Default
+                # --- END MODIFICATION ---
                 if self.config.using_note_duration_tokens and dur_list_idx is not None:
                      dur_token = time_step[dur_list_idx]
                      if dur_token is not None and dur_token.startswith("Duration_"):
                           dur_val_str = dur_token.split("_", 1)[1]
                           try:
-                              duration = self._tpb_tokens_to_ticks[ticks_per_beat][dur_val_str]
+                              # --- MODIFICATION: Ensure lookup result is int ---
+                              duration = int(self._tpb_tokens_to_ticks[ticks_per_beat][dur_val_str])
+                              # --- END MODIFICATION ---
                           except KeyError:
-                               self.logger.warning(f"Unknown duration token '{dur_val_str}' at tick {current_tick}. Using default.")
+                               self.logger.warning(f"Unknown duration token '{dur_val_str}' at tick {current_tick}. Using default ticks: {default_duration_ticks}.")
+                               duration = default_duration_ticks # Use int default ticks
                      # Allow None duration? For now, use default if token invalid.
 
 
                 # Add note to the correct track's data
                 if current_track_id not in tracks_data:
                     tracks_data[current_track_id] = {'notes': [], 'controls': []}
-                tracks_data[current_track_id]['notes'].append(Note(current_tick, duration, pitch, vel))
+                # --- MODIFICATION: Ensure duration passed to Note() is int ---
+                tracks_data[current_track_id]['notes'].append(Note(current_tick, int(duration), pitch, vel))
+                # --- END MODIFICATION ---
                 pending_cc_type = None # Reset pending CC after a note
 
             # --- CC Events --- #
@@ -1174,7 +1177,7 @@ class MuMIDI(MusicTokenizer):
         # SLOT 1: BarPosEnc
         bar_pos_enc_tokens = [
             f"BarPosEnc_{i}"
-            for i in range(self.config.additional_params.get("max_bar_embedding", 60))
+            for i in range(self.config.additional_params.get("max_bar_embedding", 256))
         ]
         add_to_vocab("BarPosEnc", bar_pos_enc_tokens)
 
