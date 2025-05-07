@@ -1117,10 +1117,10 @@ class MusicTokenizer(ABC, HFHubMixin):
         attribute_controls_indexes: Mapping[int, Mapping[int, Sequence[int] | bool]]
         | None = None,
     ) -> TokSequence | list[TokSequence]:
-        print("\n=== Starting _score_to_tokens in MusicTokenizer ===")
-        print(f"Score tracks: {len(score.tracks)}")
-        print(f"Using one token stream: {self.config.one_token_stream_for_programs}")
-        print(f"Has attribute controls: {len(self.attribute_controls) > 0}")
+        #print("\n=== Starting _score_to_tokens in MusicTokenizer ===")
+        #print(f"Score tracks: {len(score.tracks)}")
+        #print(f"Using one token stream: {self.config.one_token_stream_for_programs}")
+        #print(f"Has attribute controls: {len(self.attribute_controls) > 0}")
 
         # Create events list
         all_events = []
@@ -1133,9 +1133,9 @@ class MusicTokenizer(ABC, HFHubMixin):
             attribute_controls_indexes = {}
 
         # Global events (Tempo, TimeSignature)
-        print("\nCreating global events...")
+        #print("\nCreating global events...")
         global_events = self._create_global_events(score)
-        print(f"Created {len(global_events)} global events")
+        #print(f"Created {len(global_events)} global events")
         
         if self.config.one_token_stream_for_programs:
             all_events += global_events
@@ -1144,7 +1144,7 @@ class MusicTokenizer(ABC, HFHubMixin):
                 all_events[i] += global_events
 
         # Compute ticks_per_beat sections depending on the time signatures
-        print("\nComputing ticks per beat...")
+        #print("\nComputing ticks per beat...")
         if (
             not self._note_on_off
             or (self.config.use_sustain_pedals and self.config.sustain_pedal_duration)
@@ -1155,17 +1155,17 @@ class MusicTokenizer(ABC, HFHubMixin):
                 ticks_per_beat = get_score_ticks_per_beat(score)
             else:
                 ticks_per_beat = np.array([[score.end(), self.time_division]])
-            print(f"Ticks per beat array shape: {ticks_per_beat.shape}")
+            #print(f"Ticks per beat array shape: {ticks_per_beat.shape}")
         else:
             ticks_per_beat = None
-            print("Not using ticks per beat")
+            #print("Not using ticks per beat")
 
         # Adds track tokens
-        print("\nProcessing tracks...")
+        #print("\nProcessing tracks...")
         ticks_bars = get_bars_ticks(score, only_notes_onsets=True)
         ticks_beats = get_beats_ticks(score, only_notes_onsets=True)
         for ti, track in enumerate(score.tracks):
-            print(f"\nProcessing track {ti}...")
+            #print(f"\nProcessing track {ti}...")
             track_events = self._create_track_events(
                 track,
                 ticks_per_beat,
@@ -1174,7 +1174,7 @@ class MusicTokenizer(ABC, HFHubMixin):
                 ticks_beats,
                 attribute_controls_indexes.get(ti, None),
             )
-            print(f"Created {len(track_events)} track events")
+            #print(f"Created {len(track_events)} track events")
             
             if self.config.one_token_stream_for_programs:
                 all_events += track_events
@@ -1183,19 +1183,19 @@ class MusicTokenizer(ABC, HFHubMixin):
                 self._sort_events(all_events[ti])
                 
         if self.config.one_token_stream_for_programs:
-            print("\nSorting all events...")
+            #print("\nSorting all events...")
             self._sort_events(all_events)
             # Add ProgramChange (named Program) tokens if requested.
             if self.config.program_changes:
-                print("Adding program change events...")
+                #print("Adding program change events...")
                 self._insert_program_change_events(all_events)
         # Special case where there are only tempos/time sigs, we still need to sort them
         elif len(score.tracks) == 0 and len(all_events[0]) > 2:
-            print("\nSorting tempo/time signature events...")
+            #print("\nSorting tempo/time signature events...")
             self._sort_events(all_events[0])
 
         # Add time events
-        print("\nAdding time events...")
+        #print("\nAdding time events...")
         if self.config.one_token_stream_for_programs:
             all_events = self._add_time_events(all_events, score.ticks_per_quarter)
             tok_sequence = TokSequence(events=all_events)
@@ -1203,7 +1203,7 @@ class MusicTokenizer(ABC, HFHubMixin):
         else:
             tok_sequence = []
             for i in range(len(all_events)):
-                print(f"Adding time events for track {i}...")
+                #print(f"Adding time events for track {i}...")
                 all_events[i] = self._add_time_events(
                     all_events[i], score.ticks_per_quarter
                 )
@@ -1222,16 +1222,16 @@ class MusicTokenizer(ABC, HFHubMixin):
                 tok_sequence.append(TokSequence(events=all_events[i]))
                 self.complete_sequence(tok_sequence[-1])
 
-        print("\n=== _score_to_tokens complete ===")
+        #print("\n=== _score_to_tokens complete ===")
         return tok_sequence
 
     def _create_global_events(self, score: Score) -> list[Event]:
-        print("\n=== Starting _create_global_events in MusicTokenizer ===")
+        #print("\n=== Starting _create_global_events in MusicTokenizer ===")
         events = []
 
         # First adds time signature tokens if specified
         if self.config.use_time_signatures:
-            print("\nProcessing time signatures...")
+            #print("\nProcessing time signatures...")
             ts_events = [
                 Event(
                     type_="TimeSig",
@@ -1240,12 +1240,12 @@ class MusicTokenizer(ABC, HFHubMixin):
                 )
                 for time_sig in score.time_signatures
             ]
-            print(f"Created {len(ts_events)} time signature events")
+            #print(f"Created {len(ts_events)} time signature events")
             events += ts_events
 
         # Adds tempo events if specified
         if self.config.use_tempos:
-            print("\nProcessing tempos...")
+            #print("\nProcessing tempos...")
             tempo_events = [
                 Event(
                     type_="Tempo",
@@ -1255,10 +1255,10 @@ class MusicTokenizer(ABC, HFHubMixin):
                 )
                 for tempo in score.tempos
             ]
-            print(f"Created {len(tempo_events)} tempo events")
+            #print(f"Created {len(tempo_events)} tempo events")
             events += tempo_events
 
-        print(f"\nTotal global events: {len(events)}")
+        #print(f"\nTotal global events: {len(events)}")
         return events
 
     @abstractmethod
@@ -1293,38 +1293,38 @@ class MusicTokenizer(ABC, HFHubMixin):
         attribute_controls_indexes: Mapping[int, Mapping[int, Sequence[int] | bool]]
         | None = None,
     ) -> TokSequence | list[TokSequence]:
-        print("\n=== Starting encode() in MusicTokenizer ===")
-        print(f"Input type: {type(score)}")
-        print(f"encode_ids: {encode_ids}")
-        print(f"no_preprocess_score: {no_preprocess_score}")
+        #print("\n=== Starting encode() in MusicTokenizer ===")
+        #print(f"Input type: {type(score)}")
+        #print(f"encode_ids: {encode_ids}")
+        #print(f"no_preprocess_score: {no_preprocess_score}")
 
         # Load the file if a path was given
         if not isinstance(score, ScoreTick):
-            print("Loading score from path...")
+            #print("Loading score from path...")
             score = Score(score)
 
         # Preprocess the music file
         if not no_preprocess_score:
-            print("\nPreprocessing score...")
+            #print("\nPreprocessing score...")
             score = self.preprocess_score(score)
-            print("Score preprocessing complete")
+            #print("Score preprocessing complete")
 
         # Tokenize it
-        print("\nTokenizing score...")
+        #print("\nTokenizing score...")
         tokens = self._score_to_tokens(score, attribute_controls_indexes)
-        print("Score tokenization complete")
+        #print("Score tokenization complete")
         
         # Add bar/beat ticks here to TokSeq as they need to be from preprocessed Score
-        print("\nAdding bar/beat ticks...")
+        #print("\nAdding bar/beat ticks...")
         add_bar_beats_ticks_to_tokseq(tokens, score)
 
         # Encode the ids if the tokenizer is trained
         if encode_ids and self.is_trained:
-            print("\nEncoding token ids...")
+            #print("\nEncoding token ids...")
             self.encode_token_ids(tokens)
-            print("Token id encoding complete")
+            #print("Token id encoding complete")
 
-        print("\n=== encode() complete ===")
+        #print("\n=== encode() complete ===")
         return tokens
 
     def complete_sequence(self, seq: TokSequence, complete_bytes: bool = False) -> None:
