@@ -74,7 +74,7 @@ class MuMIDI(MusicTokenizer):
     ) -> None:
         # Initialize logger FIRST
         self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.WARNING) # Default level
+        self.logger.setLevel(logging.DEBUG) # <<< CHANGE: Set to DEBUG for these tests
 
         # Store Custom Params Temporarily
         # Get from kwargs or set defaults, these will be stored in config later
@@ -422,7 +422,7 @@ class MuMIDI(MusicTokenizer):
         score: Score,
         attribute_controls_indexes: Mapping[int, Mapping[int, Sequence[int] | bool]]
         | None = None,
-    ) -> TokSequence:
+    ) -> list[list[str | None]]:
         r"""
         Convert a **preprocessed** ``symusic.Score`` object to a sequence of tokens.
 
@@ -522,6 +522,7 @@ class MuMIDI(MusicTokenizer):
         # Sort by time, then priority, then value (for stable sort within same time/priority)
         all_track_events.sort(key=lambda x: (x.time, event_priority.get(x.type_, 10), x.value))
 
+        self.logger.debug(f"MUMIDI DEBUG: all_track_events before main loop ({len(all_track_events)} items): {all_track_events[:20]}") # ADDED: Print first 20 events
 
         # --- Build Token Sequence ---
         tokens: list[list[str | None]] = []
@@ -537,7 +538,7 @@ class MuMIDI(MusicTokenizer):
              num_token_types = max_pos_idx + 1 + abs(min_neg_idx)
         else: # Should not happen if tokenizer is initialized correctly
             self.logger.error("vocab_types_idx is missing or empty! Cannot determine num_token_types.")
-            return TokSequence(tokens=[]) # Return empty sequence
+            return [] # Return empty sequence
 
         def get_list_idx(token_type: str) -> int | None:
             public_idx = self.vocab_types_idx.get(token_type)
@@ -559,7 +560,20 @@ class MuMIDI(MusicTokenizer):
         pitch_list_idx = get_list_idx("Pitch")     # Mapped to 0
         pitch_drum_list_idx = get_list_idx("PitchDrum") # Mapped to 0
 
-        pad_token = self.config.pad_token
+        # --- Get Pad Token directly from config special tokens --- #
+        # Find the token string starting with 'PAD' in special_tokens
+        pad_token_str = self.config.special_tokens[0] # Get PAD token string (e.g., "PAD_None")
+        if hasattr(self.config, 'special_tokens') and isinstance(self.config.special_tokens, list):
+            found_pad = [tok for tok in self.config.special_tokens if tok.startswith("PAD")]
+            if found_pad:
+                pad_token_str = found_pad[0]
+            else:
+                self.logger.warning("PAD token string not found in config.special_tokens, using default 'PAD_None'")
+        else:
+            self.logger.warning("config.special_tokens not found or not a list, using default 'PAD_None' for pad token string")
+        # --- Use pad_token_str where pad_token was used below --- #
+
+        _using_track_names = self.config.additional_params.get('use_track_names', True)
 
         current_tick = -1
         current_bar = -1
@@ -567,9 +581,9 @@ class MuMIDI(MusicTokenizer):
         current_track_id: str | int = "unknown" if _using_track_names else -2
         if not _using_track_names: current_track_id = -2
 
-        velocity_none_str = f"Velocity_{min(self.velocities, key=lambda x: abs(x - DEFAULT_VELOCITY))}" if self.config.use_velocities and self.velocities else pad_token
+        velocity_none_str = f"Velocity_{min(self.velocities, key=lambda x: abs(x - DEFAULT_VELOCITY))}" if self.config.use_velocities and hasattr(self, 'velocities') and self.velocities is not None and self.velocities.size > 0 else pad_token_str
         default_dur_val = self.durations[0] if self.config.using_note_duration_tokens and self.durations else (0,0)
-        duration_none_str = f'Duration_{".".join(map(str, default_dur_val))}' if self.config.using_note_duration_tokens else pad_token
+        duration_none_str = f'Duration_{".".join(map(str, default_dur_val))}' if self.config.using_note_duration_tokens and self.durations else pad_token
 
         # --- Main loop through sorted events ---
         for event in all_track_events:
@@ -597,27 +611,29 @@ class MuMIDI(MusicTokenizer):
                 new_bar = event_time // ticks_per_bar
                 if new_bar > current_bar:
                     for bar_idx in range(current_bar + 1, new_bar + 1):
-                        bar_token_list = [pad_token] * num_token_types
+                        bar_token_list = [pad_token_str] * num_token_types
                         if bar_list_idx is not None: bar_token_list[bar_list_idx] = "Bar_None"
                         if bar_pos_enc_idx is not None: bar_token_list[bar_pos_enc_idx] = f"BarPosEnc_{bar_idx}"
                         if pos_pos_enc_idx is not None: bar_token_list[pos_pos_enc_idx] = "PositionPosEnc_None"
                         if vel_list_idx is not None: bar_token_list[vel_list_idx] = velocity_none_str
                         if dur_list_idx is not None: bar_token_list[dur_list_idx] = duration_none_str
-                        if cc_type_list_idx is not None: bar_token_list[cc_type_list_idx] = pad_token
-                        if cc_val_list_idx is not None: bar_token_list[cc_val_list_idx] = pad_token
+                        if cc_type_list_idx is not None: bar_token_list[cc_type_list_idx] = pad_token_str
+                        if cc_val_list_idx is not None: bar_token_list[cc_val_list_idx] = pad_token_str
+                        self.logger.debug(f"MUMIDI DEBUG: Appending BAR token list: {bar_token_list}")
                         tokens.append(bar_token_list)
                     current_bar = new_bar; current_pos = -1
                 pos_index = int((event_time % ticks_per_bar) / ticks_per_sample)
                 if pos_index != current_pos:
                     current_pos = pos_index; current_tick = event_time
-                    pos_token_list = [pad_token] * num_token_types
+                    pos_token_list = [pad_token_str] * num_token_types
                     if pos_list_idx is not None: pos_token_list[pos_list_idx] = f"Position_{current_pos}"
                     if bar_pos_enc_idx is not None: pos_token_list[bar_pos_enc_idx] = f"BarPosEnc_{current_bar}"
                     if pos_pos_enc_idx is not None: pos_token_list[pos_pos_enc_idx] = f"PositionPosEnc_{current_pos}"
                     if vel_list_idx is not None: pos_token_list[vel_list_idx] = velocity_none_str
                     if dur_list_idx is not None: pos_token_list[dur_list_idx] = duration_none_str
-                    if cc_type_list_idx is not None: pos_token_list[cc_type_list_idx] = pad_token
-                    if cc_val_list_idx is not None: pos_token_list[cc_val_list_idx] = pad_token
+                    if cc_type_list_idx is not None: pos_token_list[cc_type_list_idx] = pad_token_str
+                    if cc_val_list_idx is not None: pos_token_list[cc_val_list_idx] = pad_token_str
+                    self.logger.debug(f"MUMIDI DEBUG: Appending POSITION token list: {pos_token_list}")
                     tokens.append(pos_token_list)
                     current_track_id = "unknown" if _using_track_names else -2 
             else: current_tick = event_time
@@ -625,20 +641,20 @@ class MuMIDI(MusicTokenizer):
             if event_track_id is not None and event_track_id != current_track_id and event_type not in ["Tempo"]:
                  current_track_id = event_track_id
                  id_token_type = "TrackName" if _using_track_names else "Program"
-                 if event_type != id_token_type: # Don't add if current event IS the track token
-                     track_token_list = [pad_token] * num_token_types
+                 if event_type != id_token_type: 
+                     track_token_list = [pad_token_str] * num_token_types
                      id_list_idx = track_name_list_idx if _using_track_names else program_list_idx
                      if id_list_idx is not None: track_token_list[id_list_idx] = f"{id_token_type}_{current_track_id}"
                      if bar_pos_enc_idx is not None: track_token_list[bar_pos_enc_idx] = f"BarPosEnc_{current_bar}"
                      if pos_pos_enc_idx is not None: track_token_list[pos_pos_enc_idx] = f"PositionPosEnc_{current_pos}"
                      if vel_list_idx is not None: track_token_list[vel_list_idx] = velocity_none_str
-                     if dur_list_idx is not None: track_token_list[dur_list_idx] = duration_none_str
-                     if cc_type_list_idx is not None: track_token_list[cc_type_list_idx] = pad_token
-                     if cc_val_list_idx is not None: track_token_list[cc_val_list_idx] = pad_token
+                     if dur_list_idx is not None: track_token_list[dur_list_idx] = duration_none_str 
+                     if cc_type_list_idx is not None: track_token_list[cc_type_list_idx] = pad_token_str
+                     if cc_val_list_idx is not None: track_token_list[cc_val_list_idx] = pad_token_str
+                     self.logger.debug(f"MUMIDI DEBUG: Appending TRACK token list: {track_token_list}") 
                      tokens.append(track_token_list)
             
-            # Create token list for the actual event
-            event_token_list = [pad_token] * num_token_types
+            event_token_list = [pad_token_str] * num_token_types
             if bar_pos_enc_idx is not None: event_token_list[bar_pos_enc_idx] = f"BarPosEnc_{current_bar}"
             if pos_pos_enc_idx is not None: event_token_list[pos_pos_enc_idx] = f"PositionPosEnc_{current_pos}"
 
@@ -647,43 +663,46 @@ class MuMIDI(MusicTokenizer):
                 if idx is not None: event_token_list[idx] = f"{event_type}_{event_value}"
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = f"Velocity_{min(self.velocities, key=lambda x: abs(x - note_velocity))}" if note_velocity is not None else velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = f"Duration_{note_duration_str}" if note_duration_str is not None else duration_none_str
-                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token
-                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token
+                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
+                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
+                self.logger.debug(f"MUMIDI DEBUG: Appending PITCH/DRUM event token list: {event_token_list}") 
                 tokens.append(event_token_list)
             elif event_type == "ControlChange":
-                # Slot 0 is PAD (from initialization)
                 cc_num, binned_val = event_value
                 if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = f"CCType_{cc_num}"
                 if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = f"CCValue_{binned_val}"
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
+                self.logger.debug(f"MUMIDI DEBUG: Appending CC event token list: {event_token_list}") 
                 tokens.append(event_token_list)
             elif event_type == "Tempo":
                 if tempo_list_idx is not None: event_token_list[tempo_list_idx] = f"Tempo_{event_value}"
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
-                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token
-                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token
+                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
+                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
+                self.logger.debug(f"MUMIDI DEBUG: Appending TEMPO event token list: {event_token_list}") 
                 tokens.append(event_token_list)
-            elif event_type == "TrackName" or event_type == "Program":
+            elif event_type == "TrackName" or event_type == "Program": 
                 idx = track_name_list_idx if event_type == "TrackName" else program_list_idx
                 if idx is not None: event_token_list[idx] = f"{event_type}_{event_value}"
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
-                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token
-                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token
+                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
+                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
+                self.logger.debug(f"MUMIDI DEBUG: Appending TRACKNAME/PROGRAM event token list: {event_token_list}") 
                 tokens.append(event_token_list)
-            elif event_type not in ["Bar", "Position"]: # Other slot 0 types like Chord, Rest
-                event_token_list[0] = f"{event_type}_{event_value}"
+            elif event_type not in ["Bar", "Position"]: 
+                event_token_list[0] = f"{event_type}_{event_value}" 
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
-                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token
-                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token
+                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
+                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
+                self.logger.debug(f"MUMIDI DEBUG: Appending OTHER event token list ({event_type}): {event_token_list}") 
                 tokens.append(event_token_list)
 
-        # --- Finalization (Internal Validation is still here) ---
-
-        return TokSequence(tokens=tokens)
+        self.logger.debug(f"MUMIDI DEBUG: Final raw token list: {tokens}") # Keep this debug log
+        return tokens # <<< CHANGE 2: Return the raw list
 
     def __getitem__(self, item: str | tuple[int, str]) -> int:
         r"""
@@ -952,3 +971,174 @@ class MuMIDI(MusicTokenizer):
 
             previous_type = token_type
         return err
+
+    def _tokens_to_score(
+        self,
+        tokens: TokSequence,
+        _: None = None,
+    ) -> Score:
+        r"""
+        Convert tokens (:class:`miditok.TokSequence`) into a ``symusic.Score``.
+
+        This is an internal method called by ``self.decode``, intended to be
+        implemented by classes inheriting :class:`miditok.MusicTokenizer`.
+
+        :param tokens: tokens to convert. Can be either a list of
+            :class:`miditok.TokSequence` or a list of :class:`miditok.TokSequence`s.
+        :param _: in place of programs of the parent method, unused here.
+            (default: ``None``)
+        :return: the ``symusic.Score`` object.
+        """
+        score = Score(self.time_division)
+
+        # Tempos
+        if self.config.use_tempos and len(tokens) > 0:
+            first_tempo = float(tokens.tokens[0][3].split("_")[1])
+        else:
+            first_tempo = self.default_tempo
+        score.tempos.append(Tempo(0, first_tempo))
+
+        tracks = {}
+        current_tick = 0
+        current_bar = -1
+        current_track = 0  # default set to piano
+        ticks_per_beat = score.ticks_per_quarter
+        for time_step in tokens.tokens:
+            tok_type, tok_val = time_step[0].split("_")
+            if tok_type == "Bar":
+                current_bar += 1
+                current_tick = current_bar * ticks_per_beat * 4
+            elif tok_type == "Position":
+                if current_bar == -1:
+                    current_bar = (
+                        0  # as this Position token occurs before any Bar token
+                    )
+                current_tick = current_bar * ticks_per_beat * 4 + int(tok_val)
+            elif tok_type == "Program":
+                current_track = tok_val
+                try:
+                    _ = tracks[current_track]
+                except KeyError:
+                    tracks[current_track] = []
+            elif tok_type in {"Pitch", "PitchDrum"}:
+                vel = (
+                    time_step[self.vocab_types_idx["Velocity"]].split("_")[1]
+                    if self.config.use_velocities
+                    else DEFAULT_VELOCITY
+                )
+                duration = (
+                    time_step[-1].split("_")[1]
+                    if self.config.using_note_duration_tokens
+                    else int(self.config.default_note_duration * ticks_per_beat)
+                )
+                if any(val == "None" for val in (vel, duration)):
+                    continue
+                pitch = int(tok_val)
+                vel = int(vel)
+                if isinstance(duration, str):
+                    duration = self._tpb_tokens_to_ticks[ticks_per_beat][duration]
+
+                tracks[current_track].append(Note(current_tick, duration, pitch, vel))
+
+            # Decode tempo if required
+            if self.config.use_tempos:
+                tempo_val = float(time_step[3].split("_")[1])
+                if tempo_val != score.tempos[-1].tempo:
+                    score.tempos.append(Tempo(current_tick, tempo_val))
+
+        # Appends created notes to Score object
+        for program, notes in tracks.items():
+            if int(program) == -1:
+                score.tracks.append(Track(name="Drums", program=0, is_drum=True))
+            else:
+                score.tracks.append(
+                    Track(
+                        name=MIDI_INSTRUMENTS[int(program)]["name"],
+                        program=int(program),
+                        is_drum=False,
+                    )
+                )
+            score.tracks[-1].notes = notes
+
+        return score
+
+    def encode(self, score: Score | Path | str | bytes, *args, **kwargs) -> TokSequence:
+        """
+        Encodes a symusic.Score object into a MuMIDI TokSequence object.
+
+        Overrides the base class encode method to handle MuMIDI's specific
+        list[list[str]] -> list[list[int]] conversion.
+        """
+        # 1. Basic loading and preprocessing (borrowed from base class logic)
+        if not isinstance(score, Score):
+            # Attempt to load if path/str/bytes - requires symusic >= 0.3.0
+            try:
+                score = Score(score) 
+            except Exception as e:
+                raise ValueError(f"Could not load input score. Input type: {type(score)}. Error: {e}") from e
+        
+        # Preprocess the score (modifies in place)
+        # Use self.preprocess_score which handles TPQ, quantization etc.
+        preprocessed_score = self.preprocess_score(score)
+        
+        # Attribute controls are not used/compatible with MuMIDI's current logic
+        attribute_controls_indexes = None 
+
+        # 2. Call the MuMIDI-specific method to get the list[list[str]]
+        # Assumes _score_to_tokens now returns list[list[str | None]]
+        tokens_list_of_lists = self._score_to_tokens(preprocessed_score, attribute_controls_indexes) 
+
+        # 3. --- MuMIDI-specific ID conversion ---
+        ids_list_of_lists = []
+        if not hasattr(self, 'vocab') or not isinstance(self.vocab, list) or not self.vocab:
+             self.logger.error("MuMIDI vocabulary not properly initialized. Cannot convert tokens to IDs.")
+             # Return an empty sequence or raise error? Let's return empty for now.
+             return TokSequence(ids=[], tokens=[])
+
+        num_token_types = len(self.vocab) # Get number of vocabularies/slots
+        pad_token_str = self.config.special_tokens[0] # Get PAD token string (e.g., "PAD_None")
+
+        for timestep_tokens in tokens_list_of_lists:
+            timestep_ids = []
+            if isinstance(timestep_tokens, list) and len(timestep_tokens) == num_token_types: # Sanity check
+                for vocab_idx, token_str in enumerate(timestep_tokens):
+                    if token_str is None: # Handle potential None values if they slip through
+                       token_str = pad_token_str 
+                    
+                    try:
+                        # Use the overridden __getitem__ which handles tuples (vocab_idx, token_str)
+                        # vocab_idx corresponds to the index in the inner list
+                        token_id = self[(vocab_idx, token_str)] 
+                    except KeyError:
+                        # Handle unknown tokens - map to PAD ID for that specific vocabulary slot
+                        try:
+                            pad_id = self[(vocab_idx, pad_token_str)]
+                        except KeyError:
+                            # Fallback if PAD token itself isn't in that specific vocab slot (shouldn't happen ideally)
+                            self.logger.error(f"PAD token '{pad_token_str}' not found in vocab slot {vocab_idx}. Using 0 as fallback ID.")
+                            pad_id = 0 
+                        token_id = pad_id
+                        # Only warn once per unknown token type per encoding run? Could get noisy.
+                        # self.logger.warning(f"Unknown token '{token_str}' in vocab slot {vocab_idx}. Using PAD ID {pad_id}.")
+                        
+                    timestep_ids.append(token_id)
+            else:
+                self.logger.warning(f"Skipping timestep with unexpected format/length. Expected list of {num_token_types}, got: {timestep_tokens}")
+                # Append a list of PAD IDs? Or skip entirely? Let's skip for now.
+                continue # Skip this timestep
+                
+            ids_list_of_lists.append(timestep_ids)
+        # --- End ID conversion ---
+
+        # 4. Create the final TokSequence
+        # Store list[list[str]] in .tokens and list[list[int]] in .ids
+        tok_sequence = TokSequence(tokens=tokens_list_of_lists, ids=ids_list_of_lists)
+
+        # 5. Add BOS/EOS - MuMIDI typically doesn't use them, but if needed:
+        # Since .tokens and .ids are list[list], prepending/appending BOS/EOS
+        # would require creating appropriate pooled token lists for BOS/EOS.
+        # Example: bos_token_list = [self.bos_token] * num_token_types -> convert to IDs -> prepend
+        # Skipping BOS/EOS addition for MuMIDI for now, as it might not be standard.
+
+        return tok_sequence
+
