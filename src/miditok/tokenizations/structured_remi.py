@@ -254,12 +254,12 @@ class StructuredREMI(REMI):
             # Only set default if not already present in the passed config
             if 'num_cc_bins' not in tokenizer_config.additional_params:
                  tokenizer_config.additional_params['num_cc_bins'] = _num_cc_bins
-                 self.logger.debug(f"Setting 'num_cc_bins' to default value: {_num_cc_bins}")
+                 #self.logger.debug(f"Setting 'num_cc_bins' to default value: {_num_cc_bins}")
             else:
                  # If present, use the value from the config and update _num_cc_bins
                  # so that the .get() fallback later uses the correct value if needed.
                  _num_cc_bins = tokenizer_config.additional_params['num_cc_bins']
-                 self.logger.debug(f"Using 'num_cc_bins' ({_num_cc_bins}) from provided tokenizer_config.")
+                 #self.logger.debug(f"Using 'num_cc_bins' ({_num_cc_bins}) from provided tokenizer_config.")
             # <<< Store/update new flags in provided config >>>
             tokenizer_config.additional_params['use_roman_numerals'] = _use_roman_numerals
             tokenizer_config.additional_params['use_neo_riemannian'] = _use_neo_riemannian

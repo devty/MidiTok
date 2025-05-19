@@ -70,19 +70,23 @@ class MuMIDI(MusicTokenizer):
         self,
         tokenizer_config: TokenizerConfig = None,
         params: str | Path | None = None,
-        **kwargs,
     ) -> None:
         # Initialize logger FIRST
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.DEBUG) # <<< CHANGE: Set to DEBUG for these tests
 
-        # Store Custom Params Temporarily
-        # Get from kwargs or set defaults, these will be stored in config later
-        _use_track_names = kwargs.get('use_track_names', True)
-        _use_filtered_ccs = kwargs.get('use_filtered_ccs', True)
-        _cc_filter_mode = kwargs.get('cc_filter_mode', 'instrument_aware')
-        _explicit_cc_list = set(kwargs.get('cc_list', []))
-        _num_cc_bins = kwargs.get('num_cc_bins', DEFAULT_CC_BINS)
+        # Default configuration values (will be overridden by config if provided)
+        _use_track_names = True
+        _use_filtered_ccs = True
+        _cc_filter_mode = 'explicit_list'  # Default to explicit_list mode
+        # Include both 0-based and 1-based CC numbers to handle all cases
+        # Common MIDI CC numbers:
+        # 0/1 = Bank Select / Modulation
+        # 7 = Volume
+        # 10/11 = Pan / Expression
+        # 20/21 = Undefined / General Purpose Controller 5
+        _explicit_cc_list = {0, 1, 7, 10, 11, 20, 21}  # Include both numbering systems
+        _num_cc_bins = 128  # Full resolution for CC values
 
         # Setup Config (BEFORE super().__init__)
         # Handle the case where no config or params file is provided
@@ -102,7 +106,7 @@ class MuMIDI(MusicTokenizer):
                  program_changes=False,
                  # Default beat res, potentially adjust
                  beat_res={(0, 4): 8, (4, 12): 4},
-                 num_velocities=128, # MuMIDI usually uses 128
+                 num_velocities=127, # MuMIDI uses 127 velocities (MIDI standard)
                  additional_params={
                      'max_bar_embedding': 256, # Default from original MuMIDI
                      # Add new flags to default config
@@ -127,8 +131,8 @@ class MuMIDI(MusicTokenizer):
                  tokenizer_config.use_programs = False
 
 
-        # Call parent __init__ AFTER config setup
-        super().__init__(tokenizer_config=tokenizer_config, params=params, **kwargs)
+        # Call parent __init__ with only required arguments
+        super().__init__(tokenizer_config=tokenizer_config, params=params)
 
         # Setup Post Parent Init
         # Reload custom attributes from the *final* config (self.config)
@@ -153,22 +157,45 @@ class MuMIDI(MusicTokenizer):
         self.logger.info(f"Initialized Enhanced MuMIDI with: use_track_names={self.use_track_names}, "
                          f"use_filtered_ccs={self.use_filtered_ccs} (mode={self.cc_filter_mode}, bins={self.num_cc_bins})")
 
-        # Initialize CC Instrument Map (similar to StructuredREMI)
+        # Initialize CC Instrument Map
         self.cc_instrument_map: Dict[str, Set[int]] = {}
-        # Use families directly as keys
-        instrument_types_for_cc = list(TARGET_INSTRUMENT_FAMILIES) + ["unknown"] # Use families
-        default_relevant_ccs = get_relevant_ccs_for_instrument("unknown", extended=True) # Default for unknown
-
-        for family in instrument_types_for_cc:
-            # Map family to a representative program to get instrument type for CCs
-            # This assumes get_program_from_instrument_family exists and works
-            program, is_drum = get_program_from_instrument_family(family)
-            instrument_type = get_instrument_type_from_program(program)
-            self.cc_instrument_map[family] = set(get_relevant_ccs_for_instrument(instrument_type, extended=True))
-
-        # Ensure 'unknown' family exists
-        if "unknown" not in self.cc_instrument_map:
-             self.cc_instrument_map["unknown"] = set(default_relevant_ccs)
+        
+        # Set up CC handling based on filter mode
+        if self.cc_filter_mode == 'all':
+            self.cc_instrument_map["all"] = set(range(128))  # All CCs
+            self.logger.info("Using all CC numbers (0-127)")
+        elif self.cc_filter_mode == 'explicit_list':
+            self.cc_instrument_map["all"] = self.explicit_cc_list
+            self.logger.info(f"Using explicit CC list: {sorted(self.cc_instrument_map['all'])}")
+        elif self.cc_filter_mode == 'instrument_aware':
+            # For instrument-aware mode, we'll use the default mapping
+            self.cc_instrument_map["all"] = {1, 11, 21}  # Default CCs
+            self.logger.info(f"Using instrument-aware CCs with default mapping: {sorted(self.cc_instrument_map['all'])}")
+        else:  # 'none' or invalid mode
+            self.cc_instrument_map["all"] = set()
+            self.logger.info("CC filtering is disabled (no CCs will be included)")
+        
+        # Override get_relevant_ccs_for_instrument to return the configured CC list
+        def get_ccs_for_instrument(*args, **kwargs):
+            return list(self.cc_instrument_map.get('all', set()))
+        
+        # Replace the function in utils
+        import miditok.utils.structured_utils
+        miditok.utils.structured_utils.get_relevant_ccs_for_instrument = get_ccs_for_instrument
+        
+        # Debug logging for CC events
+        def log_cc_event(cc: ControlChange):
+            if cc.number in self.cc_instrument_map['all']:
+                self.logger.debug(f"Processing CC event: number={cc.number}, value={cc.value}")
+        
+        # Add debug logging to ControlChange handling
+        def handle_cc_event(self, cc: ControlChange):
+            #log_cc_event(cc)
+            # Original handling logic here
+            return super().handle_cc_event(cc)
+        
+        # Override the method in the tokenizer
+        self.handle_cc_event = handle_cc_event.__get__(self)
 
         # Internal State
         self._current_track_family: str = "unknown"
@@ -252,9 +279,8 @@ class MuMIDI(MusicTokenizer):
              current_neg_idx -= 1 # Decrement after Velocity
         # <<< NEW: Assign dedicated negative slots for CCs if used >>>
         if self.config.additional_params.get('use_filtered_ccs', True):
-             self.vocab_types_idx["CCType"] = current_neg_idx
+             self.vocab_types_idx["ControlChange"] = current_neg_idx
              current_neg_idx -= 1
-             self.vocab_types_idx["CCValue"] = current_neg_idx
              # current_neg_idx -= 1 # Decrement only if more types follow
 
         # Chord and Rest will also go to slot 0 if enabled
@@ -264,7 +290,7 @@ class MuMIDI(MusicTokenizer):
              self.vocab_types_idx["Rest"] = 0
         # If using tempos, and they are to be event-like, map "Tempo" type to vocab slot 0
         if self.config.use_tempos:
-            self.vocab_types_idx["Tempo"] = 0
+            self.vocab_types_idx["Tempo"] = 0 # <<< MODIFIED: Tempo mapped to slot 0
 
     def _add_time_events(self, events: list[Event], time_division: int) -> list[Event]:
         """
@@ -375,7 +401,7 @@ class MuMIDI(MusicTokenizer):
         """
         # Keep the old function signature but log warning and call new one?
         # Or just remove/rename this one? Let's keep signature for now but make it call bundled.
-        self.logger.warning("_create_control_change_events_filtered is deprecated, use _create_control_change_events_bundled.")
+        #self.logger.warning("_create_control_change_events_filtered is deprecated, use _create_control_change_events_bundled.")
         return self._create_control_change_events_bundled(controls, track_family)
 
     def _create_control_change_events_bundled(self, controls: List[ControlChange], track_family: str) -> List[Event]:
@@ -389,30 +415,71 @@ class MuMIDI(MusicTokenizer):
         """
         events = []
         if not controls:
+            #self.logger.debug(f"No control changes to process for track family: {track_family}")
             return events
+
+        #self.logger.debug(f"Processing {len(controls)} CC events for track family: {track_family}")
+        
+        # Log the first few CC events for debugging
+        #for i, cc in enumerate(controls[:5]):  # Log first 5 CC events
+        #    self.logger.debug(f"CC {i+1}: number={cc.number}, value={cc.value}, time={cc.time}")
+        #if len(controls) > 5:
+        #    self.logger.debug(f"... and {len(controls) - 5} more CC events")
 
         allowed_ccs: Set[int]
         program, _ = get_program_from_instrument_family(track_family)
         inst_type = get_instrument_type_from_program(program)
+        
+        #self.logger.debug(f"Using CC filter mode: {self.cc_filter_mode}")
+        #self.logger.debug(f"Track family: {track_family}, Program: {program}, Instrument type: {inst_type}")
 
         if self.cc_filter_mode == 'all':
             allowed_ccs = set(range(128))
+            #self.logger.debug("Allowing all CC numbers (0-127)")
         elif self.cc_filter_mode == 'explicit_list':
             allowed_ccs = self.explicit_cc_list
+            #self.logger.debug(f"Using explicit CC list: {sorted(allowed_ccs)}")
         elif self.cc_filter_mode == 'instrument_aware':
-             allowed_ccs = self.cc_instrument_map.get(track_family, self.cc_instrument_map.get(inst_type, self.cc_instrument_map["unknown"]))
-        else: # 'none' or invalid mode
+            allowed_ccs = self.cc_instrument_map.get(
+                track_family, 
+                self.cc_instrument_map.get(inst_type, self.cc_instrument_map["unknown"])
+            )
+            #self.logger.debug(f"Using instrument-aware CCs for {track_family}: {sorted(allowed_ccs)}")
+        else:  # 'none' or invalid mode
+            #self.logger.debug(f"CC filtering is disabled (mode: {self.cc_filter_mode})")
             return events
 
         num_bins = self.config.additional_params.get('num_cc_bins', DEFAULT_CC_BINS)
+        #self.logger.debug(f"Using {num_bins} bins for CC value quantization")
 
+        processed_ccs = set()
         for control in controls:
             if control.number in allowed_ccs:
-                value = min(max(control.value, 0), 127)
+                original_value = control.value
+                value = min(max(original_value, 0), 127)
                 binned_value = int((value / 127.0) * (num_bins - 1))
+                
+                # Log detailed info for each processed CC
+                if control.number not in processed_ccs:
+                    #self.logger.debug(
+                    #    f"Processing CC {control.number}: "
+                    #    f"value={original_value} -> binned={binned_value}/{(num_bins-1)}"
+                    #)
+                    processed_ccs.add(control.number)
+                
                 # Create ONE event bundling number and binned value
                 event_value = (control.number, binned_value)
-                events.append(Event(type_="ControlChange", value=event_value, time=control.time))
+                events.append(Event(
+                    type_="ControlChange", 
+                    value=event_value, 
+                    time=control.time,
+                    desc=f"CC{control.number}={binned_value}"  # Add description for debugging
+                ))
+            #else:
+            #    #self.logger.debug(f"Skipping CC {control.number} (not in allowed list)")
+        
+        #self.logger.debug(f"Generated {len(events)} CC events from {len(controls)} original controls")
+        return events
 
         return events
 
@@ -469,7 +536,7 @@ class MuMIDI(MusicTokenizer):
                  track_id = track_family
                  # Skip track if family is None or handle as 'unknown'? Let's map to unknown.
                  if track_family is None:
-                      self.logger.debug(f"Track '{track.name}' did not map to a known family. Using 'unknown'.")
+                      #self.logger.debug(f"Track '{track.name}' did not map to a known family. Using 'unknown'.")
                       track_family = "unknown"
                       track_id = "unknown"
 
@@ -522,7 +589,7 @@ class MuMIDI(MusicTokenizer):
         # Sort by time, then priority, then value (for stable sort within same time/priority)
         all_track_events.sort(key=lambda x: (x.time, event_priority.get(x.type_, 10), x.value))
 
-        self.logger.debug(f"MUMIDI DEBUG: all_track_events before main loop ({len(all_track_events)} items): {all_track_events[:20]}") # ADDED: Print first 20 events
+        #self.logger.debug(f"MUMIDI DEBUG: all_track_events before main loop ({len(all_track_events)} items): {all_track_events[:20]}") # ADDED: Print first 20 events
 
         # --- Build Token Sequence ---
         tokens: list[list[str | None]] = []
@@ -586,10 +653,15 @@ class MuMIDI(MusicTokenizer):
         duration_none_str = f'Duration_{".".join(map(str, default_dur_val))}' if self.config.using_note_duration_tokens and self.durations else pad_token
 
         # --- Main loop through sorted events ---
+        self.logger.debug(f"Processing {len(all_track_events)} events in _score_to_tokens")
         for event in all_track_events:
             event_time = event.time
             event_type = event.type_
             event_value = event.value
+            
+            # Debug log for CC events
+            if event_type == "ControlChange":
+                self.logger.debug(f"Processing CC event at time {event_time}: {event_value}")
             
             event_track_id = None; note_velocity = None; note_duration_str = None
             if event_type in ["Pitch", "PitchDrum"]:
@@ -619,7 +691,7 @@ class MuMIDI(MusicTokenizer):
                         if dur_list_idx is not None: bar_token_list[dur_list_idx] = duration_none_str
                         if cc_type_list_idx is not None: bar_token_list[cc_type_list_idx] = pad_token_str
                         if cc_val_list_idx is not None: bar_token_list[cc_val_list_idx] = pad_token_str
-                        self.logger.debug(f"MUMIDI DEBUG: Appending BAR token list: {bar_token_list}")
+                        #self.logger.debug(f"MUMIDI DEBUG: Appending BAR token list: {bar_token_list}")
                         tokens.append(bar_token_list)
                     current_bar = new_bar; current_pos = -1
                 pos_index = int((event_time % ticks_per_bar) / ticks_per_sample)
@@ -633,7 +705,7 @@ class MuMIDI(MusicTokenizer):
                     if dur_list_idx is not None: pos_token_list[dur_list_idx] = duration_none_str
                     if cc_type_list_idx is not None: pos_token_list[cc_type_list_idx] = pad_token_str
                     if cc_val_list_idx is not None: pos_token_list[cc_val_list_idx] = pad_token_str
-                    self.logger.debug(f"MUMIDI DEBUG: Appending POSITION token list: {pos_token_list}")
+                    #self.logger.debug(f"MUMIDI DEBUG: Appending POSITION token list: {pos_token_list}")
                     tokens.append(pos_token_list)
                     current_track_id = "unknown" if _using_track_names else -2 
             else: current_tick = event_time
@@ -651,7 +723,7 @@ class MuMIDI(MusicTokenizer):
                      if dur_list_idx is not None: track_token_list[dur_list_idx] = duration_none_str 
                      if cc_type_list_idx is not None: track_token_list[cc_type_list_idx] = pad_token_str
                      if cc_val_list_idx is not None: track_token_list[cc_val_list_idx] = pad_token_str
-                     self.logger.debug(f"MUMIDI DEBUG: Appending TRACK token list: {track_token_list}") 
+                     #self.logger.debug(f"MUMIDI DEBUG: Appending TRACK token list: {track_token_list}") 
                      tokens.append(track_token_list)
             
             event_token_list = [pad_token_str] * num_token_types
@@ -665,43 +737,55 @@ class MuMIDI(MusicTokenizer):
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = f"Duration_{note_duration_str}" if note_duration_str is not None else duration_none_str
                 if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
                 if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
-                self.logger.debug(f"MUMIDI DEBUG: Appending PITCH/DRUM event token list: {event_token_list}") 
+                #self.logger.debug(f"MUMIDI DEBUG: Appending PITCH/DRUM event token list: {event_token_list}") 
                 tokens.append(event_token_list)
             elif event_type == "ControlChange":
+                # Use bundled ControlChange token (cc_num_binned_val)
                 cc_num, binned_val = event_value
-                if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = f"CCType_{cc_num}"
-                if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = f"CCValue_{binned_val}"
-                if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
-                if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
-                self.logger.debug(f"MUMIDI DEBUG: Appending CC event token list: {event_token_list}") 
-                tokens.append(event_token_list)
-            elif event_type == "Tempo":
-                if tempo_list_idx is not None: event_token_list[tempo_list_idx] = f"Tempo_{event_value}"
+                # Add to the primary slot (index 0)
+                event_token_list[0] = f"ControlChange_{cc_num}_{binned_val}"
+                # Fill other slots with pad tokens
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
                 if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
                 if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
-                self.logger.debug(f"MUMIDI DEBUG: Appending TEMPO event token list: {event_token_list}") 
+                
+                # ENHANCED LOGGING: Log the CC token being added
+                self.logger.debug(f"Adding CC token to sequence: {event_token_list[0]} (CC#{cc_num}, value={binned_val})")
+                
                 tokens.append(event_token_list)
-            elif event_type == "TrackName" or event_type == "Program": 
+            elif event_type == "Tempo": # MODIFIED: Add Tempo to primary slot (0)
+                if tempo_list_idx is not None and tempo_list_idx == 0: # Ensure it's mapped to slot 0
+                    event_token_list[0] = f"Tempo_{event_value}"
+                    # Fill other slots with pad tokens
+                    if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
+                    if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
+                    if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
+                    if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
+                    tokens.append(event_token_list)
+                else:
+                    # This shouldn't happen if Tempo is mapped to 0, but for safety:
+                    self.logger.warning(f"Tempo event encountered but tempo_list_idx ({tempo_list_idx}) is not 0. Skipping event.")
+            elif event_type == "TrackName" or event_type == "Program":
                 idx = track_name_list_idx if event_type == "TrackName" else program_list_idx
                 if idx is not None: event_token_list[idx] = f"{event_type}_{event_value}"
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
                 if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
                 if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
-                self.logger.debug(f"MUMIDI DEBUG: Appending TRACKNAME/PROGRAM event token list: {event_token_list}") 
+                #self.logger.debug(f"MUMIDI DEBUG: Appending TRACKNAME/PROGRAM event token list: {event_token_list}")
                 tokens.append(event_token_list)
-            elif event_type not in ["Bar", "Position"]: 
-                event_token_list[0] = f"{event_type}_{event_value}" 
+            elif event_type not in ["Bar", "Position"]:
+                # This handles other types like Chord, Rest if enabled and mapped to slot 0
+                event_token_list[0] = f"{event_type}_{event_value}"
                 if vel_list_idx is not None: event_token_list[vel_list_idx] = velocity_none_str
                 if dur_list_idx is not None: event_token_list[dur_list_idx] = duration_none_str
                 if cc_type_list_idx is not None: event_token_list[cc_type_list_idx] = pad_token_str
                 if cc_val_list_idx is not None: event_token_list[cc_val_list_idx] = pad_token_str
-                self.logger.debug(f"MUMIDI DEBUG: Appending OTHER event token list ({event_type}): {event_token_list}") 
+                #self.logger.debug(f"MUMIDI DEBUG: Appending OTHER event token list ({event_type}): {event_token_list}")
                 tokens.append(event_token_list)
 
-        self.logger.debug(f"MUMIDI DEBUG: Final raw token list: {tokens}") # Keep this debug log
+        #self.logger.debug(f"MUMIDI DEBUG: Final raw token list: {tokens}") # Keep this debug log
         return tokens # <<< CHANGE 2: Return the raw list
 
     def __getitem__(self, item: str | tuple[int, str]) -> int:
@@ -825,13 +909,57 @@ class MuMIDI(MusicTokenizer):
             program_tokens = [f"Program_{program}" for program in self.config.programs]
             add_to_vocab("Program", program_tokens)
 
-        # Add CCType and CCValue if enabled # <<< CHANGE: Add to their dedicated slots
+        # Add bundled ControlChange tokens if enabled
         if self.config.additional_params.get('use_filtered_ccs', True):
-            cc_type_tokens = [f"CCType_{i}" for i in range(128)]
-            add_to_vocab("CCType", cc_type_tokens) # Will use index from vocab_types_idx
             num_bins = self.config.additional_params.get('num_cc_bins', DEFAULT_CC_BINS)
-            cc_value_tokens = [f"CCValue_{i}" for i in range(num_bins)]
-            add_to_vocab("CCValue", cc_value_tokens) # Will use index from vocab_types_idx
+            
+            # Determine which CC numbers to include in vocabulary
+            cc_numbers_to_include = []
+            filter_mode = self.config.additional_params.get('cc_filter_mode', 'explicit_list')
+            
+            if filter_mode == 'all':
+                cc_numbers_to_include = list(range(128))
+                self.logger.debug("Including all CC numbers (0-127) in vocabulary")
+            elif filter_mode == 'explicit_list':
+                # Get the list from config
+                cc_list = self.config.additional_params.get('cc_list', [])
+                cc_numbers_to_include = list(set(cc_list))  # Convert to set and back to remove duplicates
+                self.logger.debug(f"Including explicit CC numbers in vocabulary: {sorted(cc_numbers_to_include)}")
+            elif filter_mode == 'instrument_aware':
+                # Include all possible CCs from instrument map if available
+                if hasattr(self, 'cc_instrument_map'):
+                    for inst_type in self.cc_instrument_map.keys():
+                        cc_numbers_to_include.extend(self.cc_instrument_map[inst_type])
+                else:
+                    # Fallback to common CC numbers
+                    cc_numbers_to_include = [0, 1, 7, 10, 11, 20, 21]
+                cc_numbers_to_include = list(set(cc_numbers_to_include))  # Remove duplicates
+                self.logger.debug(f"Including instrument-aware CC numbers in vocabulary: {sorted(cc_numbers_to_include)}")
+            else:
+                # Fallback to common CC numbers
+                cc_numbers_to_include = [0, 1, 7, 10, 11, 20, 21]
+                self.logger.warning(f"Unknown CC filter mode: {filter_mode}. Using default CC numbers: {cc_numbers_to_include}")
+            
+            # Ensure we have at least some CC numbers
+            if not cc_numbers_to_include:
+                cc_numbers_to_include = [0, 1, 7, 10, 11, 20, 21]
+                self.logger.warning(f"No CC numbers found in configuration. Using default CC numbers: {cc_numbers_to_include}")
+            
+            # Add bundled ControlChange tokens (format: "ControlChange_cc_binned_val")
+            cc_tokens = [f"ControlChange_{cc}_{binned_val}" 
+                        for cc in cc_numbers_to_include 
+                        for binned_val in range(num_bins)]
+            add_to_vocab("ControlChange", cc_tokens)
+            
+            # Log the number of CC tokens added for debugging
+            self.logger.debug(f"Added {len(cc_tokens)} bundled ControlChange tokens to vocabulary for {len(cc_numbers_to_include)} CC numbers")
+            
+            # Explicitly log the first few tokens for verification
+            if cc_tokens:
+                self.logger.debug(f"Sample CC tokens: {cc_tokens[:5]}...")
+                
+            # Store the list of CC numbers for later use
+            self.config.additional_params['cc_list'] = cc_numbers_to_include
 
         # SLOT 1: BarPosEnc
         bar_pos_enc_tokens = [
@@ -1062,6 +1190,31 @@ class MuMIDI(MusicTokenizer):
 
         return score
 
+    def extract_cc_tokens(self, token_lists: List[List[str]]) -> List[str]:
+        """
+        Extract ControlChange tokens from the nested token lists.
+        
+        This is a helper method for debugging CC token processing.
+        
+        :param token_lists: List of token lists from _score_to_tokens
+        :return: List of ControlChange tokens found
+        """
+        cc_tokens = []
+        for i, token_list in enumerate(token_lists):
+            if not isinstance(token_list, list):
+                continue
+                
+            for j, token in enumerate(token_list):
+                if token is None or not isinstance(token, str):
+                    continue
+                    
+                if token.startswith('ControlChange_'):
+                    self.logger.debug(f"Found CC token at position [{i}][{j}]: {token}")
+                    cc_tokens.append(token)
+        
+        self.logger.debug(f"Extracted {len(cc_tokens)} CC tokens from token lists")
+        return cc_tokens
+        
     def encode(self, score: Score | Path | str | bytes, *args, **kwargs) -> TokSequence:
         """
         Encodes a symusic.Score object into a MuMIDI TokSequence object.
@@ -1086,7 +1239,23 @@ class MuMIDI(MusicTokenizer):
 
         # 2. Call the MuMIDI-specific method to get the list[list[str]]
         # Assumes _score_to_tokens now returns list[list[str | None]]
-        tokens_list_of_lists = self._score_to_tokens(preprocessed_score, attribute_controls_indexes) 
+        tokens_list_of_lists = self._score_to_tokens(preprocessed_score, attribute_controls_indexes)
+        
+        # Extract CC tokens for debugging and analysis
+        cc_tokens = self.extract_cc_tokens(tokens_list_of_lists)
+        self.logger.debug(f"Found {len(cc_tokens)} CC tokens in the token sequence")
+        if cc_tokens:
+            self.logger.debug(f"Sample CC tokens: {cc_tokens[:10]}")
+            
+        # If we have CC tokens, make sure they're included in the token sequence
+        # by flattening the nested structure for easier analysis
+        flat_tokens = []
+        for token_list in tokens_list_of_lists:
+            if isinstance(token_list, list):
+                # Add all non-PAD tokens from the list
+                for token in token_list:
+                    if token is not None and isinstance(token, str) and not token.startswith('PAD_'):
+                        flat_tokens.append(token)
 
         # 3. --- MuMIDI-specific ID conversion ---
         ids_list_of_lists = []
@@ -1132,7 +1301,18 @@ class MuMIDI(MusicTokenizer):
 
         # 4. Create the final TokSequence
         # Store list[list[str]] in .tokens and list[list[int]] in .ids
+        # Also include the flattened tokens for easier analysis
         tok_sequence = TokSequence(tokens=tokens_list_of_lists, ids=ids_list_of_lists)
+        
+        # Add the flattened tokens as an additional attribute
+        tok_sequence.flat_tokens = flat_tokens
+        
+        # If we have CC tokens, add them to the token sequence for easier access
+        if cc_tokens:
+            tok_sequence.cc_tokens = cc_tokens
+            self.logger.debug(f"Added {len(cc_tokens)} CC tokens to token sequence")
+        else:
+            tok_sequence.cc_tokens = []
 
         # 5. Add BOS/EOS - MuMIDI typically doesn't use them, but if needed:
         # Since .tokens and .ids are list[list], prepending/appending BOS/EOS
